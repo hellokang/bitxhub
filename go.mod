@@ -28,7 +28,7 @@ require (
 	github.com/magiconair/properties v1.8.4
 	github.com/meshplus/bitxhub-core v1.3.0
 	github.com/meshplus/bitxhub-kit v1.2.0
-	github.com/meshplus/bitxhub-model v1.2.1-0.20210429021628-d64a34d749b4
+	github.com/meshplus/bitxhub-model v1.2.1-0.20210429093929-9350a1a1d8a8
 	github.com/meshplus/bitxid v0.0.0-20210412025850-e0eaf0f9063a
 	github.com/meshplus/did-registry v0.0.0-20210413035015-509c6c3a0bae
 	github.com/meshplus/go-libp2p-cert v0.0.0-20210125063330-7c25fd5b7a49
@@ -64,5 +64,9 @@ replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20200218
 replace google.golang.org/grpc => google.golang.org/grpc v1.33.0
 
 replace github.com/hyperledger/fabric => github.com/hyperledger/fabric v2.0.1+incompatible
+
+replace (
+	github.com/meshplus/bitxhub-model => ../bitxhub-model
+)
 
 go 1.13

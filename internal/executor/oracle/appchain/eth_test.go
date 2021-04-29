@@ -119,6 +119,7 @@ func TestVerifyProof(t *testing.T) {
 	proof, err := rlp.EncodeToBytes(nodeSet.NodeList())
 	require.Nil(t, err)
 
-	err = VerifyProof(receipts[index], header, proof)
+	MinConfirmNum = 0
+	err = oracle.VerifyProof(receipts[index], proof)
 	require.Nil(t, err)
 }
