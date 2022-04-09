@@ -35,14 +35,11 @@ type NetworkNodes struct {
 	Account string   `toml:"account" json:"account"`
 }
 
-func loadNetworkConfig(repoRoot string, genesis Genesis) (*NetworkConfig, error) {
+func loadNetworkConfig(viper *viper.Viper, repoRoot string, genesis Genesis) (*NetworkConfig, error) {
 	networkConfig := &NetworkConfig{Genesis: genesis}
-	if err := ReadConfig(filepath.Join(repoRoot, "network.toml"), "toml", networkConfig); err != nil {
-		return nil, err
-	}
-
-	if uint64(len(networkConfig.Nodes)) != networkConfig.N {
-		return nil, fmt.Errorf("wrong nodes number")
+	checkReaptAddr := make(map[string]uint64)
+	if err := ReadConfig(viper, filepath.Join(repoRoot, "network.toml"), "toml", networkConfig); err != nil {
+		return nil, fmt.Errorf("read network config error: %w", err)
 	}
 
 	for _, node := range networkConfig.Nodes {
@@ -56,6 +53,11 @@ func loadNetworkConfig(repoRoot string, genesis Genesis) (*NetworkConfig, error)
 				return nil, fmt.Errorf("new multiaddr: %w", err)
 			}
 			networkConfig.LocalAddr = strings.Replace(networkConfig.LocalAddr, ma.Split(addr)[0].String(), "/ip4/0.0.0.0", -1)
+		}
+		if _, ok := checkReaptAddr[node.Hosts[0]]; !ok {
+			checkReaptAddr[node.Hosts[0]] = node.ID
+		} else {
+			return nil, fmt.Errorf("reapt address")
 		}
 	}
 
@@ -118,7 +120,7 @@ func (config *NetworkConfig) GetNetworkPeers() (map[uint64]*peer.AddrInfo, error
 		}
 		addrInfo, err := peer.AddrInfoFromP2pAddr(multiaddr)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("convert multiaddr to addrInfo failed: %w", err)
 		}
 		for i := 1; i < len(node.Hosts); i++ {
 			multiaddr, err := ma.NewMultiaddr(fmt.Sprintf("%s%s", node.Hosts[i], node.Pid))
@@ -139,10 +141,10 @@ func RewriteNetworkConfig(repoRoot string, infos map[uint64]*pb.VpInfo, isNew bo
 	v.SetConfigFile(filepath.Join(repoRoot, "network.toml"))
 	v.SetConfigType("toml")
 	if err := v.ReadInConfig(); err != nil {
-		return err
+		return fmt.Errorf("readInConfig error: %w", err)
 	}
 	if err := v.Unmarshal(networkConfig); err != nil {
-		return err
+		return fmt.Errorf("unmarshal network config error: %w", err)
 	}
 
 	nodes := make([]*NetworkNodes, 0, len(infos))
@@ -163,15 +165,15 @@ func RewriteNetworkConfig(repoRoot string, infos map[uint64]*pb.VpInfo, isNew bo
 		nodes = append(nodes, node)
 	}
 	networkConfig.Nodes = nodes
-	networkConfig.N = uint64(len(nodes))
+	networkConfig.N = uint64(v.GetUint("N"))
 	networkConfig.New = isNew
 	data, err := toml.Marshal(*networkConfig)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal network config error: %w", err)
 	}
 	err = v.ReadConfig(bytes.NewBuffer(data))
 	if err != nil {
-		return err
+		return fmt.Errorf("readConfig error: %w", err)
 	}
 	return v.WriteConfig()
 }
@@ -180,21 +182,21 @@ func RewriteNetworkConfig(repoRoot string, infos map[uint64]*pb.VpInfo, isNew bo
 func GetPidFromPrivFile(privPath string) (string, error) {
 	data, err := ioutil.ReadFile(privPath)
 	if err != nil {
-		return "", fmt.Errorf("read private key: %w", err)
+		return "", fmt.Errorf("read private key error: %w", err)
 	}
 	privKey, err := libp2pcert.ParsePrivateKey(data, crypto2.ECDSA_P256)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("parse private key failed: %w", err)
 	}
 
 	_, pk, err := crypto.KeyPairFromStdKey(privKey.K)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("wrap standard library private key to libp2p keys failed: %w", err)
 	}
 
 	pid, err := peer.IDFromPublicKey(pk)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("get peer ID failed: %w", err)
 	}
 
 	return pid.String(), nil

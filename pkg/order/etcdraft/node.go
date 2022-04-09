@@ -9,35 +9,40 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Rican7/retry"
+	"github.com/Rican7/retry/strategy"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/meshplus/bitxhub-core/agency"
+	"github.com/meshplus/bitxhub-core/order"
+	orderPeerMgr "github.com/meshplus/bitxhub-core/peer-mgr"
 	"github.com/meshplus/bitxhub-kit/log"
 	"github.com/meshplus/bitxhub-kit/storage"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/pb"
-	"github.com/meshplus/bitxhub/pkg/order"
 	raftproto "github.com/meshplus/bitxhub/pkg/order/etcdraft/proto"
 	"github.com/meshplus/bitxhub/pkg/order/mempool"
 	"github.com/meshplus/bitxhub/pkg/order/syncer"
-	"github.com/meshplus/bitxhub/pkg/peermgr"
 	"github.com/sirupsen/logrus"
 )
 
 type Node struct {
-	id       uint64             // raft id
-	leader   uint64             // leader id
-	repoRoot string             // project path
-	logger   logrus.FieldLogger // logger
+	id           uint64             // raft id
+	leader       uint64             // leader id
+	repoRoot     string             // project path
+	isTimed      bool               // generate block on time
+	blockTimeout time.Duration      // generate block period
+	logger       logrus.FieldLogger // logger
 
-	node          raft.Node           // raft node
-	peerMgr       peermgr.PeerManager // network manager
-	peers         []raft.Peer         // raft peers
-	syncer        syncer.Syncer       // state syncer
-	raftStorage   *RaftStorage        // the raft backend storage system
-	storage       storage.Storage     // db
-	mempool       mempool.MemPool     // transaction pool
-	txCache       *mempool.TxCache    // cache the transactions received from api
+	node          raft.Node                     // raft node
+	peerMgr       orderPeerMgr.OrderPeerManager // network manager
+	peers         []raft.Peer                   // raft peers
+	syncer        syncer.Syncer                 // state syncer
+	raftStorage   *RaftStorage                  // the raft backend storage system
+	storage       storage.Storage               // db
+	mempool       mempool.MemPool               // transaction pool
+	txCache       *mempool.TxCache              // cache the transactions received from api
 	batchTimerMgr *BatchTimer
 
 	proposeC          chan *raftproto.RequestBatch // proposed ready, input channel
@@ -49,6 +54,7 @@ type Node struct {
 	msgC              chan []byte                  // receive messages from remote peer
 	stateC            chan *mempool.ChainState     // receive the executed block state
 	rebroadcastTicker chan *raftproto.TxSlice      // receive the executed block state
+	getTxC            chan *GetTxReq
 
 	confState         raftpb.ConfState     // raft requires ConfState to be persisted within snapshot
 	blockAppliedIndex sync.Map             // mapping of block height and apply index in raft log
@@ -61,12 +67,27 @@ type Node struct {
 	justElected       bool                 // track new leader status
 	getChainMetaFunc  func() *pb.ChainMeta // current chain meta
 	ctx               context.Context      // context
-	haltC             chan struct{}        // exit signal
+	cancel            context.CancelFunc
+	haltC             chan struct{} // exit signal
+}
+
+type GetTxReq struct {
+	Hash *types.Hash
+	Tx   chan pb.Transaction
+}
+
+func init() {
+	agency.RegisterOrderConstructor("raft", NewNode)
 }
 
 // NewNode new raft node
 func NewNode(opts ...order.Option) (order.Order, error) {
-	config, err := order.GenerateConfig(opts...)
+	var options []order.Option
+	for i, _ := range opts {
+		options = append(options, opts[i])
+	}
+
+	config, err := order.GenerateConfig(options...)
 	if err != nil {
 		return nil, fmt.Errorf("generate config: %w", err)
 	}
@@ -79,7 +100,7 @@ func NewNode(opts ...order.Option) (order.Order, error) {
 	dbDir := filepath.Join(config.StoragePath, "state")
 	raftStorage, dbStorage, err := CreateStorage(config.Logger, walDir, snapDir, dbDir, raft.NewMemoryStorage())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("init raft and database storage failed: %w", err)
 	}
 
 	// generate raft peers
@@ -89,7 +110,7 @@ func NewNode(opts ...order.Option) (order.Order, error) {
 		return nil, fmt.Errorf("generate raft peers: %w", err)
 	}
 
-	raftConfig, err := generateRaftConfig(repoRoot)
+	raftConfig, timedGenBlock, err := generateRaftConfig(repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("generate raft txpool config: %w", err)
 	}
@@ -104,6 +125,7 @@ func NewNode(opts ...order.Option) (order.Order, error) {
 		PoolSize:       raftConfig.RAFT.MempoolConfig.PoolSize,
 		TxSliceSize:    raftConfig.RAFT.MempoolConfig.TxSliceSize,
 		TxSliceTimeout: raftConfig.RAFT.MempoolConfig.TxSliceTimeout,
+		IsTimed:        timedGenBlock.Enable,
 	}
 	mempoolInst, err := mempool.NewMempool(mempoolConf)
 	if err != nil {
@@ -138,12 +160,15 @@ func NewNode(opts ...order.Option) (order.Order, error) {
 	node := &Node{
 		id:               config.ID,
 		lastExec:         config.Applied,
+		isTimed:          timedGenBlock.Enable,
+		blockTimeout:     timedGenBlock.BlockTimeout,
 		confChangeC:      make(chan raftpb.ConfChange),
 		commitC:          make(chan *pb.CommitEvent, 1024),
 		errorC:           make(chan<- error),
 		msgC:             make(chan []byte),
 		stateC:           make(chan *mempool.ChainState),
 		proposeC:         make(chan *raftproto.RequestBatch),
+		getTxC:           make(chan *GetTxReq),
 		snapCount:        snapCount,
 		repoRoot:         repoRoot,
 		peerMgr:          config.PeerMgr,
@@ -155,7 +180,6 @@ func NewNode(opts ...order.Option) (order.Order, error) {
 		storage:          dbStorage,
 		raftStorage:      raftStorage,
 		readyPool:        readyPool,
-		ctx:              context.Background(),
 		mempool:          mempoolInst,
 		checkInterval:    checkInterval,
 	}
@@ -180,12 +204,33 @@ func NewNode(opts ...order.Option) (order.Order, error) {
 
 // Start or restart raft node
 func (n *Node) Start() error {
+	n.ctx, n.cancel = context.WithCancel(context.Background())
+	if err := retry.Retry(func(attempt uint) error {
+		select {
+		case <-n.ctx.Done():
+			n.logger.Infof("stop checkQuorum")
+			return nil
+
+		default:
+			err := n.checkQuorum()
+			if err != nil {
+				n.logger.Errorf("check quorum failed: %s", err.Error())
+				return err
+			}
+			return nil
+		}
+	},
+		strategy.Wait(1*time.Second),
+	); err != nil {
+		n.logger.Error(err)
+	}
+
 	n.blockAppliedIndex.Store(n.lastExec, n.loadAppliedIndex())
 	rc, tickTimeout, err := generateEtcdRaftConfig(n.id, n.repoRoot, n.logger, n.raftStorage.ram)
 	if err != nil {
 		return fmt.Errorf("generate raft config: %w", err)
 	}
-	if restart {
+	if restart.Load() {
 		n.node = raft.RestartNode(rc)
 	} else {
 		n.node = raft.StartNode(rc, n.peers)
@@ -193,7 +238,7 @@ func (n *Node) Start() error {
 	n.tickTimeout = tickTimeout
 
 	go n.run()
-	go n.txCache.ListenEvent()
+	go n.txCache.ListenEvent(n.ctx)
 	n.logger.Info("Consensus module started")
 
 	return nil
@@ -201,19 +246,28 @@ func (n *Node) Start() error {
 
 // Stop the raft node
 func (n *Node) Stop() {
-	n.node.Stop()
+	n.cancel()
 	n.logger.Infof("Consensus stopped")
 }
 
-// Add the transaction into txpool and broadcast it to other nodes
+// Prepare Add the transaction into txpool and broadcast it to other nodes
 func (n *Node) Prepare(tx pb.Transaction) error {
 	if err := n.Ready(); err != nil {
-		return err
+		return fmt.Errorf("node get ready failed: %w", err)
 	}
 	if n.txCache.IsFull() && n.mempool.IsPoolFull() {
 		return errors.New("transaction cache are full, we will drop this transaction")
 	}
+
+	txWithResp := &mempool.TxWithResp{
+		Tx: tx,
+		Ch: make(chan bool),
+	}
+	n.txCache.TxRespC <- txWithResp
 	n.txCache.RecvTxC <- tx
+
+	<-txWithResp.Ch
+
 	return nil
 }
 
@@ -240,6 +294,7 @@ func (n *Node) Step(msg []byte) error {
 }
 
 func (n *Node) Ready() error {
+	// TODO(lrx): Need to optimize it, the leader exit in memPool although node had already stopped
 	hasLeader := n.leader != 0
 	if !hasLeader {
 		return errors.New("in leader election status")
@@ -251,8 +306,18 @@ func (n *Node) GetPendingNonceByAccount(account string) uint64 {
 	return n.mempool.GetPendingNonceByAccount(account)
 }
 
+func (n *Node) GetPendingTxByHash(hash *types.Hash) pb.Transaction {
+	getTxReq := &GetTxReq{
+		Hash: hash,
+		Tx:   make(chan pb.Transaction),
+	}
+	n.getTxC <- getTxReq
+
+	return <-getTxReq.Tx
+}
+
 // DelNode sends a delete vp request by given id.
-func (n *Node) DelNode(delID uint64) error {
+func (n *Node) DelNode(uint64) error {
 	return nil
 }
 
@@ -263,6 +328,7 @@ func (n *Node) SubscribeTxEvent(events chan<- pb.Transactions) event.Subscriptio
 
 // main work loop
 func (n *Node) run() {
+	var blockTicker <-chan time.Time
 	snap, err := n.raftStorage.ram.Snapshot()
 	if err != nil {
 		n.logger.Panic(err)
@@ -270,6 +336,10 @@ func (n *Node) run() {
 	n.confState = snap.Metadata.ConfState
 	n.snapshotIndex = snap.Metadata.Index
 	n.appliedIndex = snap.Metadata.Index
+	//if n.appliedIndex == 0 {
+	//	n.appliedIndex = n.loadAppliedIndex()
+	//}
+	n.logger.Infof("snap index:%d", snap.Metadata.Index)
 	ticker := time.NewTicker(n.tickTimeout)
 	rebroadcastTicker := time.NewTicker(n.checkInterval)
 	defer ticker.Stop()
@@ -287,11 +357,11 @@ func (n *Node) run() {
 			case batch := <-n.proposeC:
 				data, err := batch.Marshal()
 				if err != nil {
-					n.logger.Error("Marshal batch failed")
+					n.logger.Errorf("Marshal batch failed: %s", err.Error())
 				}
 				n.logger.Debugf("Proposed block %d to raft core consensus", batch.Height)
 				if err := n.node.Propose(n.ctx, data); err != nil {
-					n.logger.Errorf("Failed to propose block [%d] to raft: %s", batch.Height, err)
+					n.logger.Errorf("Failed to propose block [%d] to raft: %s", batch.Height, err.Error())
 				}
 			case cc, ok := <-n.confChangeC:
 				if !ok {
@@ -300,10 +370,11 @@ func (n *Node) run() {
 					confChangeCount++
 					cc.ID = confChangeCount
 					if err := n.node.ProposeConfChange(n.ctx, cc); err != nil {
-						n.logger.Errorf("Failed to propose configuration update to Raft node: %s", err)
+						n.logger.Errorf("Failed to propose configuration update to Raft node: %s", err.Error())
 					}
 				}
 			case <-n.ctx.Done():
+				n.logger.Infof("stop run1")
 				return
 			}
 		}
@@ -312,6 +383,12 @@ func (n *Node) run() {
 
 	// handle messages from raft state machine
 	for {
+		if n.isTimed && n.isLeader() {
+			// leader start the Block timer
+			if blockTicker == nil {
+				blockTicker = time.Tick(n.blockTimeout)
+			}
+		}
 		select {
 		case <-ticker.C:
 			n.node.Tick()
@@ -331,8 +408,14 @@ func (n *Node) run() {
 			pbMsg := msgToConsensusPbMsg(data, raftproto.RaftMessage_BROADCAST_TX, n.id)
 			_ = n.peerMgr.Broadcast(pbMsg)
 
-			// 2. process transactions
-			n.processTransactions(txSet.Transactions, true)
+		// 2. process transactions
+		//n.processTransactions(txSet.Transactions, true)
+		case txWithResp := <-n.txCache.TxRespC:
+			n.processTransactions([]pb.Transaction{txWithResp.Tx}, true)
+			txWithResp.Ch <- true
+
+		case getTxReq := <-n.getTxC:
+			getTxReq.Tx <- n.mempool.GetTransaction(getTxReq.Hash)
 
 		case state := <-n.stateC:
 			n.reportState(state)
@@ -358,10 +441,25 @@ func (n *Node) run() {
 				if n.mempool.HasPendingRequest() {
 					if batch := n.mempool.GenerateBlock(); batch != nil {
 						n.postProposal(batch)
+						n.batchTimerMgr.StartBatchTimer()
 					}
 				} else {
 					n.logger.Debug("The length of priorityIndex is 0, skip the batch timer")
 				}
+			} else {
+				n.logger.Warningf("Replica %d try to generate batch, but the leader is %d", n.id, n.leader)
+			}
+
+		case <-blockTicker:
+			// call txPool module to generate a tx batch
+			if n.isLeader() {
+				//blockTicker = nil
+				n.logger.Debug("Leader block timer expired, try to create a block")
+				if !n.mempool.HasPendingRequest() {
+					n.logger.Debug("start create empty block")
+				}
+				batch := n.mempool.GenerateBlock()
+				n.postProposal(batch)
 			} else {
 				n.logger.Warningf("Replica %d try to generate batch, but the leader is %d", n.id, n.leader)
 			}
@@ -372,7 +470,7 @@ func (n *Node) run() {
 			// 1: Write HardState, Entries, and Snapshot to persistent storage if they
 			// are not empty.
 			if err := n.raftStorage.Store(rd.Entries, rd.HardState, rd.Snapshot); err != nil {
-				n.logger.Errorf("Failed to persist etcd/raft data: %s", err)
+				n.logger.Errorf("Failed to persist etcd/raft data: %s", err.Error())
 			}
 
 			if !raft.IsEmptySnap(rd.Snapshot) {
@@ -402,6 +500,7 @@ func (n *Node) run() {
 			}
 
 			if n.justElected {
+				n.mempool.SetBatchSeqNo(n.lastExec)
 				msgInflight := n.ramLastIndex() > n.appliedIndex+1
 				if msgInflight {
 					n.logger.Debug("There are in flight blocks, new leader should not generate new batches")
@@ -418,25 +517,33 @@ func (n *Node) run() {
 			// 4: Call Node.Advance() to signal readiness for the next batch of updates.
 			n.node.Advance()
 		case <-n.ctx.Done():
-			n.Stop()
+			n.node.Stop()
+			n.logger.Infof("stop run2")
+			return
 		}
 	}
 }
 
 func (n *Node) processTransactions(txList []pb.Transaction, isLocal bool) {
-	// leader node would check if this transaction triggered generating a batch or not
-	if n.isLeader() {
-		// start batch timer when this node receives the first transaction
-		if !n.batchTimerMgr.IsBatchTimerActive() {
-			n.batchTimerMgr.StartBatchTimer()
-		}
-		// If this transaction triggers generating a batch, stop batch timer
-		if batch := n.mempool.ProcessTransactions(txList, true, isLocal); batch != nil {
-			n.batchTimerMgr.StopBatchTimer()
-			n.postProposal(batch)
+
+	if !n.isTimed {
+		// leader node would check if this transaction triggered generating a batch or not
+		if n.isLeader() {
+			// start batch timer when this node receives the first transaction
+			if !n.batchTimerMgr.IsBatchTimerActive() {
+				n.batchTimerMgr.StartBatchTimer()
+			}
+			// If this transaction triggers generating a batch, stop batch timer
+			if batch := n.mempool.ProcessTransactions(txList, true, isLocal); batch != nil {
+				n.batchTimerMgr.StopBatchTimer()
+				n.postProposal(batch)
+			}
+		} else {
+			n.mempool.ProcessTransactions(txList, false, isLocal)
 		}
 	} else {
-		n.mempool.ProcessTransactions(txList, false, isLocal)
+		// generate block on time, needn't post Proposal based batch limit
+		n.mempool.ProcessTransactions(txList, true, isLocal)
 	}
 }
 
@@ -461,17 +568,19 @@ func (n *Node) publishEntries(ents []raftpb.Entry) bool {
 			blockAppliedIndex := n.getBlockAppliedIndex()
 			if blockAppliedIndex >= ents[i].Index {
 				n.appliedIndex = ents[i].Index
+				n.logger.Infof("n.appliedIndex=%d", n.appliedIndex)
 				continue
 			}
 			requestBatch := n.readyPool.Get().(*raftproto.RequestBatch)
 			if err := requestBatch.Unmarshal(ents[i].Data); err != nil {
-				n.logger.Error(err)
+				n.logger.Errorf("unmarshal request batch error: %s", err.Error())
 				continue
 			}
 			// strictly avoid writing the same block
 			if requestBatch.Height != n.lastExec+1 {
-				n.logger.Warningf("Replica %d expects to execute seq=%d, but get seq=%d, ignore it",
-					n.id, n.lastExec+1, requestBatch.Height)
+				n.logger.Warningf("Replica %d expects to execute seq=%d, idx=%d, but get seq=%d, ignore it",
+					n.id, n.lastExec+1, ents[i].Index, requestBatch.Height)
+				n.appliedIndex = ents[i].Index
 				continue
 			}
 			n.mint(requestBatch)
@@ -527,7 +636,7 @@ func (n *Node) mint(requestBatch *raftproto.RequestBatch) {
 		BlockHeader: &pb.BlockHeader{
 			Version:   []byte("1.0.0"),
 			Number:    requestBatch.Height,
-			Timestamp: time.Now().UnixNano(),
+			Timestamp: requestBatch.Timestamp,
 		},
 		Transactions: requestBatch.TxList,
 	}
@@ -550,12 +659,12 @@ func (n *Node) maybeTriggerSnapshot() {
 	}
 	data, err := n.getSnapshot()
 	if err != nil {
-		n.logger.Error(err)
+		n.logger.Errorf("get snapshot failed: %s", err.Error())
 		return
 	}
 	err = n.raftStorage.TakeSnapshot(n.appliedIndex, n.confState, data)
 	if err != nil {
-		n.logger.Error(err)
+		n.logger.Errorf("take snapshot failed: %s", err.Error())
 		return
 	}
 	n.snapshotIndex = n.appliedIndex
@@ -582,20 +691,20 @@ func (n *Node) reportState(state *mempool.ChainState) {
 func (n *Node) processRaftCoreMsg(msg []byte) error {
 	rm := &raftproto.RaftMessage{}
 	if err := rm.Unmarshal(msg); err != nil {
-		return err
+		return fmt.Errorf("unmarshal raft message error: %w", err)
 	}
 	switch rm.Type {
 	case raftproto.RaftMessage_CONSENSUS:
 		msg := &raftpb.Message{}
 		if err := msg.Unmarshal(rm.Data); err != nil {
-			return err
+			return fmt.Errorf("unmarshal message error: %w", err)
 		}
 		return n.node.Step(context.Background(), *msg)
 
 	case raftproto.RaftMessage_BROADCAST_TX:
 		txSlice := &pb.Transactions{}
 		if err := txSlice.Unmarshal(rm.Data); err != nil {
-			return err
+			return fmt.Errorf("unmarshal transactions error: %w", err)
 		}
 		n.processTransactions(txSlice.Transactions, false)
 
@@ -616,7 +725,7 @@ func (n *Node) send(messages []raftpb.Message) {
 
 			data, err := (&msg).Marshal()
 			if err != nil {
-				n.logger.Error(err)
+				n.logger.Errorf("unmarshal message error: %s", err.Error())
 				return
 			}
 
@@ -626,7 +735,7 @@ func (n *Node) send(messages []raftpb.Message) {
 			}
 			rmData, err := rm.Marshal()
 			if err != nil {
-				n.logger.Error(err)
+				n.logger.Errorf("unmarshal raft message error: %s", err.Error())
 				return
 			}
 			p2pMsg := &pb.Message{
@@ -655,7 +764,6 @@ func (n *Node) send(messages []raftpb.Message) {
 
 func (n *Node) postProposal(batch *raftproto.RequestBatch) {
 	n.proposeC <- batch
-	n.batchTimerMgr.StartBatchTimer()
 }
 
 func (n *Node) becomeFollower() {
@@ -665,4 +773,23 @@ func (n *Node) becomeFollower() {
 
 func (n *Node) setLastExec(height uint64) {
 	n.lastExec = height
+}
+
+func (n *Node) checkQuorum() error {
+	n.logger.Infof("=======Quorum = %d, connected peers = %d", n.Quorum(), n.peerMgr.CountConnectedPeers()+1)
+	if n.peerMgr.CountConnectedPeers()+1 < n.Quorum() {
+		return errors.New("the number of connected Peers don't reach Quorum")
+	}
+	return nil
+}
+
+func (n *Node) Restart() error {
+	n.logger.Infof("restart node%d", n.id)
+	n.Stop()
+	restart.Store(true)
+	err := n.Start()
+	if err != nil {
+		return fmt.Errorf("restart node err: %s", err)
+	}
+	return nil
 }

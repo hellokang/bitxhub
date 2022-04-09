@@ -40,14 +40,11 @@ function prepare() {
   rm -rf "${BUILD_PATH}"
   mkdir "${BUILD_PATH}"
 
-  cd "${PROJECT_PATH}"/internal/plugins
-  make raft
 }
 
 function generate() {
   cd "${BUILD_PATH}"
   cp "${PROJECT_PATH}"/bin/bitxhub "${BUILD_PATH}"
-  cp -rf "${PROJECT_PATH}"/internal/plugins/build/raft.so "${BUILD_PATH}"
 
   "${BUILD_PATH}"/bitxhub cert ca
   "${BUILD_PATH}"/bitxhub cert priv gen --name agency
@@ -60,13 +57,12 @@ function generate() {
     mkdir -p "${repo}"
    "${BUILD_PATH}"/bitxhub --repo="${repo}" init
 
-    mkdir -p "${repo}"/plugins
     mkdir -p "${repo}"/certs
 
     cd "${repo}"/certs
     "${BUILD_PATH}"/bitxhub cert priv gen --name node
     "${BUILD_PATH}"/bitxhub cert csr --key ./node.priv --org Node${i}
-    "${BUILD_PATH}"/bitxhub cert issue --key "${BUILD_PATH}"/agency.priv --cert "${BUILD_PATH}"/agency.cert --csr ./node.csr
+    "${BUILD_PATH}"/bitxhub cert issue --key "${BUILD_PATH}"/agency.priv --cert "${BUILD_PATH}"/agency.cert --csr ./node.csr --is_ca true
     "${BUILD_PATH}"/bitxhub key gen --name key
     cp "${BUILD_PATH}"/ca.cert "${repo}"/certs
     cp "${BUILD_PATH}"/agency.cert "${repo}"/certs

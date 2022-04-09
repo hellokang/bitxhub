@@ -1,6 +1,7 @@
 package etcdraft
 
 import (
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -10,7 +11,13 @@ import (
 )
 
 type RAFTConfig struct {
-	RAFT RAFT
+	RAFT          RAFT
+	TimedGenBlock TimedGenBlock `mapstructure:"timed_gen_block"`
+}
+
+type TimedGenBlock struct {
+	Enable       bool          `toml:"enable" json:"enable"`
+	BlockTimeout time.Duration `mapstructure:"block_timeout" json:"block_timeout"`
 }
 
 type MempoolConfig struct {
@@ -52,10 +59,17 @@ func defaultRaftConfig() raft.Config {
 	}
 }
 
+func defaultTimedConfig() TimedGenBlock {
+	return TimedGenBlock{
+		Enable:       true,
+		BlockTimeout: 2 * time.Second,
+	}
+}
+
 func generateEtcdRaftConfig(id uint64, repoRoot string, logger logrus.FieldLogger, ram MemoryStorage) (*raft.Config, time.Duration, error) {
 	readConfig, err := readConfig(repoRoot)
 	if err != nil {
-		return &raft.Config{}, 100 * time.Millisecond, nil
+		return &raft.Config{}, 100 * time.Millisecond, err
 	}
 	defaultConfig := defaultRaftConfig()
 	defaultConfig.ID = id
@@ -79,12 +93,20 @@ func generateEtcdRaftConfig(id uint64, repoRoot string, logger logrus.FieldLogge
 	return &defaultConfig, readConfig.RAFT.TickTimeout, nil
 }
 
-func generateRaftConfig(repoRoot string) (*RAFTConfig, error) {
+func generateRaftConfig(repoRoot string) (*RAFTConfig, *TimedGenBlock, error) {
 	readConfig, err := readConfig(repoRoot)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("read config from %s error: %w", repoRoot, err)
 	}
-	return readConfig, nil
+	timedGenBlock := defaultTimedConfig()
+	timedGenBlock = TimedGenBlock{
+		Enable:       readConfig.TimedGenBlock.Enable,
+		BlockTimeout: readConfig.TimedGenBlock.BlockTimeout,
+	}
+	if err := checkConfig(readConfig); err != nil {
+		return nil, nil, fmt.Errorf("check config failed: %w", err)
+	}
+	return readConfig, &timedGenBlock, nil
 }
 
 func readConfig(repoRoot string) (*RAFTConfig, error) {
@@ -92,14 +114,27 @@ func readConfig(repoRoot string) (*RAFTConfig, error) {
 	v.SetConfigFile(filepath.Join(repoRoot, "order.toml"))
 	v.SetConfigType("toml")
 	if err := v.ReadInConfig(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ReadInConfig error: %w", err)
 	}
 
-	config := &RAFTConfig{}
+	config := &RAFTConfig{
+		TimedGenBlock: defaultTimedConfig(),
+	}
 
 	if err := v.Unmarshal(config); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal config error: %w", err)
+	}
+
+	if err := checkConfig(config); err != nil {
+		return nil, fmt.Errorf("check config failed: %w", err)
 	}
 
 	return config, nil
+}
+
+func checkConfig(config *RAFTConfig) error {
+	if config.TimedGenBlock.BlockTimeout <= 0 {
+		return fmt.Errorf("Illegal parameter, blockTimeout must be a positive number. ")
+	}
+	return nil
 }

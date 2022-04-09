@@ -3,27 +3,26 @@ package main
 import (
 	"fmt"
 	"math/big"
-	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/pprof"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/meshplus/bitxhub"
+	"github.com/meshplus/bitxhub-core/agency"
 	"github.com/meshplus/bitxhub-kit/log"
-	"github.com/meshplus/bitxhub-model/pb"
 	"github.com/meshplus/bitxhub/api/gateway"
 	"github.com/meshplus/bitxhub/api/grpc"
 	"github.com/meshplus/bitxhub/api/jsonrpc"
 	"github.com/meshplus/bitxhub/internal/app"
 	"github.com/meshplus/bitxhub/internal/coreapi"
 	"github.com/meshplus/bitxhub/internal/loggers"
+	"github.com/meshplus/bitxhub/internal/profile"
 	"github.com/meshplus/bitxhub/internal/repo"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	types2 "github.com/meshplus/eth-kit/types"
 	"github.com/urfave/cli"
 )
 
@@ -31,8 +30,27 @@ var logger = log.NewWithModule("cmd")
 
 func startCMD() cli.Command {
 	return cli.Command{
-		Name:   "start",
-		Usage:  "Start a long-running start process",
+		Name:  "start",
+		Usage: "Start a long-running daemon process",
+		Flags: []cli.Flag{
+			cli.StringFlag{
+				Name:  "config",
+				Usage: "Specify BitXHub config path",
+			},
+			cli.StringFlag{
+				Name:  "network",
+				Usage: "Specify BitXHub network config path",
+			},
+			cli.StringFlag{
+				Name:  "order",
+				Usage: "Specify BitXHub order config path",
+			},
+			cli.StringFlag{
+				Name:     "passwd",
+				Usage:    "Specify BitXHub node private key password",
+				Required: false,
+			},
+		},
 		Action: start,
 	}
 }
@@ -43,7 +61,12 @@ func start(ctx *cli.Context) error {
 		return fmt.Errorf("get repo path: %w", err)
 	}
 
-	repo, err := repo.Load(repoRoot)
+	passwd := ctx.String("passwd")
+	configPath := ctx.String("config")
+	networkPath := ctx.String("network")
+	orderPath := ctx.String("order")
+
+	repo, err := repo.Load(repoRoot, passwd, configPath, networkPath)
 	if err != nil {
 		return fmt.Errorf("repo load: %w", err)
 	}
@@ -62,25 +85,32 @@ func start(ctx *cli.Context) error {
 
 	loggers.Initialize(repo.Config)
 
-	pb.InitEIP155Signer(big.NewInt(int64(repo.Config.ChainID)))
-
-	if repo.Config.PProf.Enable {
-		switch repo.Config.PProf.PType {
-		case "runtime":
-			go runtimePProf(repo.Config.RepoRoot, repo.Config.PProf.Mode, repo.NetworkConfig.ID, repo.Config.PProf.Duration)
-		case "http":
-			httpPProf(repo.Config.Port.PProf)
-		}
-	}
-
-	if repo.Config.Monitor.Enable {
-		runMonitor(repo.Config.Port.Monitor)
-	}
+	types2.InitEIP155Signer(big.NewInt(int64(repo.Config.ChainID)))
 
 	printVersion()
 
-	bxh, err := app.NewBitXHub(repo)
+	if err := checkLicense(repo); err != nil {
+		return fmt.Errorf("verify license fail:%v", err)
+	}
+
+	bxh, err := app.NewBitXHub(repo, orderPath)
 	if err != nil {
+		return fmt.Errorf("init bitxhub failed: %w", err)
+	}
+
+	monitor, err := profile.NewMonitor(repo.Config)
+	if err != nil {
+		return err
+	}
+	if err := monitor.Start(); err != nil {
+		return err
+	}
+
+	pprof, err := profile.NewPprof(repo.Config)
+	if err != nil {
+		return err
+	}
+	if err := pprof.Start(); err != nil {
 		return err
 	}
 
@@ -91,13 +121,13 @@ func start(ctx *cli.Context) error {
 	}
 
 	// start grpc service
-	b, err := grpc.NewChainBrokerService(api, repo.Config, &repo.Config.Genesis)
+	b, err := grpc.NewChainBrokerService(api, repo.Config, &repo.Config.Genesis, bxh.Ledger)
 	if err != nil {
 		return err
 	}
 
 	if err := b.Start(); err != nil {
-		return err
+		return fmt.Errorf("start chain broker service failed: %w", err)
 	}
 
 	// start json-rpc service
@@ -107,28 +137,42 @@ func start(ctx *cli.Context) error {
 	}
 
 	if err := cbs.Start(); err != nil {
-		return err
+		return fmt.Errorf("start chain broker service failed: %w", err)
 	}
 
-	go func() {
-		logger.WithField("port", repo.Config.Port.Gateway).Info("Gateway service started")
-		err := gateway.Start(repo.Config)
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
+	gw := gateway.NewGateway(repo.Config)
+	if err := gw.Start(); err != nil {
+		fmt.Println(err)
+	}
+
+	bxh.Monitor = monitor
+	bxh.Pprof = pprof
+	bxh.Grpc = b
+	bxh.Jsonrpc = cbs
+	bxh.Gateway = gw
 
 	var wg sync.WaitGroup
 	wg.Add(1)
+	handleLicenceCheck(bxh, repo, &wg)
 	handleShutdown(bxh, &wg)
 
 	if err := bxh.Start(); err != nil {
-		return err
+		return fmt.Errorf("start bitxhub failed: %w", err)
 	}
 
 	wg.Wait()
 
 	return nil
+}
+
+func checkLicense(rep *repo.Repo) error {
+	licenseCon, err := agency.GetLicenseConstructor("license")
+	if err != nil {
+		return nil
+	}
+	license := rep.Config.License
+	licenseVerifier := licenseCon(license.Key, license.Verifier)
+	return licenseVerifier.Verify(rep.Config.RepoRoot)
 }
 
 func printVersion() {
@@ -139,6 +183,25 @@ func printVersion() {
 	fmt.Println()
 }
 
+func handleLicenceCheck(node *app.BitXHub, repo *repo.Repo, wg *sync.WaitGroup) {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := checkLicense(repo); err != nil {
+					fmt.Printf("verify license fail:%v", err)
+					if err := node.Stop(); err != nil {
+						panic(err)
+					}
+					wg.Done()
+					os.Exit(0)
+				}
+			}
+		}
+	}()
+}
 func handleShutdown(node *app.BitXHub, wg *sync.WaitGroup) {
 	var stop = make(chan os.Signal)
 	signal.Notify(stop, syscall.SIGTERM)
@@ -153,86 +216,4 @@ func handleShutdown(node *app.BitXHub, wg *sync.WaitGroup) {
 		wg.Done()
 		os.Exit(0)
 	}()
-}
-
-// runtimePProf will record the cpu or memory profiles every 5 second.
-func runtimePProf(repoRoot, mode string, id uint64, duration time.Duration) {
-	tick := time.NewTicker(duration)
-	rootPath := filepath.Join(repoRoot, "/pprof/")
-	exist := fileExist(rootPath)
-	if !exist {
-		err := os.Mkdir(rootPath, os.ModePerm)
-		if err != nil {
-			fmt.Printf("----- runtimePProf start failed, err: %s -----\n", err.Error())
-			return
-		}
-	}
-
-	var cpuFile *os.File
-	if mode == "cpu" {
-		subPath := fmt.Sprint("cpu-", time.Now().Format("20060102-15:04:05"))
-		cpuPath := filepath.Join(rootPath, subPath)
-		cpuFile, _ = os.Create(cpuPath)
-		_ = pprof.StartCPUProfile(cpuFile)
-	}
-	for {
-		select {
-		case <-tick.C:
-			switch mode {
-			case "cpu":
-				pprof.StopCPUProfile()
-				_ = cpuFile.Close()
-				subPath := fmt.Sprint("cpu-", time.Now().Format("20060102-15:04:05"))
-				cpuPath := filepath.Join(rootPath, subPath)
-				cpuFile, _ := os.Create(cpuPath)
-				_ = pprof.StartCPUProfile(cpuFile)
-			case "memory":
-				subPath := fmt.Sprint("mem-", time.Now().Format("20060102-15:04:05"))
-				memPath := filepath.Join(rootPath, subPath)
-				memFile, _ := os.Create(memPath)
-				_ = pprof.WriteHeapProfile(memFile)
-				_ = memFile.Close()
-			}
-		}
-	}
-}
-
-func httpPProf(port int64) {
-	go func() {
-		addr := fmt.Sprintf(":%d", port)
-		logger.WithField("port", port).Info("Start pprof")
-		err := http.ListenAndServe(addr, nil)
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
-}
-
-// runMonitor runs prometheus handler
-func runMonitor(port int64) {
-	go func() {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.Handler())
-		addr := fmt.Sprintf(":%d", port)
-		server := http.Server{
-			Addr:    addr,
-			Handler: mux,
-		}
-		logger.WithField("port", port).Info("Start monitor")
-		err := server.ListenAndServe()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
-}
-
-func fileExist(path string) bool {
-	_, err := os.Stat(path)
-	if err != nil {
-		if os.IsExist(err) {
-			return true
-		}
-		return false
-	}
-	return true
 }

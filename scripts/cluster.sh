@@ -37,11 +37,11 @@ function prepare() {
     root=${BUILD_PATH}/node${i}
     mkdir -p "${root}"
 
-    cp -rf "${CURRENT_PATH}"/certs/node${i}/certs "${root}"
+    cp -rf "${CURRENT_PATH}"/certs/node${i}/* "${root}"
     cp -rf "${CONFIG_PATH}"/* "${root}"
 
     echo " #!/usr/bin/env bash" >"${root}"/start.sh
-    echo "./bitxhub --root \$(pwd)" start >>"${root}"/start.sh
+    echo "./bitxhub --repo \$(pwd)" start >>"${root}"/start.sh
 
     bitxhubConfig=${root}/bitxhub.toml
     networkConfig=${root}/network.toml
@@ -51,14 +51,6 @@ function prepare() {
     x_replace "s/40011/4001${i}/g" "${bitxhubConfig}"
     x_replace "s/8881/888${i}/g" "${bitxhubConfig}"
     x_replace "1s/1/${i}/" "${networkConfig}"
-  done
-
-  print_blue "===> Building plugin"
-  cd "${PROJECT_PATH}"/internal/plugins
-  make raft${TAGS}
-
-  for ((i = 1; i < N + 1; i = i + 1)); do
-    cp -rf "${PROJECT_PATH}"/internal/plugins/build "${BUILD_PATH}"/node${i}/plugins
   done
 }
 

@@ -7,12 +7,11 @@ import (
 	appchain_mgr "github.com/meshplus/bitxhub-core/appchain-mgr"
 	"github.com/meshplus/bitxhub-model/constant"
 	"github.com/meshplus/bitxhub-model/pb"
-	"github.com/meshplus/bitxid"
 )
 
 func (router *InterchainRouter) queryAllAppchains() (map[string]*appchain_mgr.Appchain, error) {
 	ret := make(map[string]*appchain_mgr.Appchain, 0)
-	ok, value := router.ledger.QueryByPrefix(constant.AppchainMgrContractAddr.Address(), appchain_mgr.PREFIX)
+	ok, value := router.ledger.Copy().QueryByPrefix(constant.AppchainMgrContractAddr.Address(), appchain_mgr.Prefix)
 	if !ok {
 		return ret, nil
 	}
@@ -23,15 +22,16 @@ func (router *InterchainRouter) queryAllAppchains() (map[string]*appchain_mgr.Ap
 			router.logger.Errorf("unmarshal appchain error:%v", err)
 			return nil, fmt.Errorf("unmarshal appchain error:%v", err)
 		}
-		if chain.ChainType == appchain_mgr.RelaychainType {
-			continue
-		}
+		// TODO
+		//if chain.ChainType == appchain_mgr.RelaychainType {
+		//	continue
+		//}
 		ret[chain.ID] = chain
 	}
 	return ret, nil
 }
 
-func (router *InterchainRouter) generateUnionInterchainTxWrappers(ret map[bitxid.DID]*pb.InterchainTxWrapper, block *pb.Block, meta *pb.InterchainMeta) *pb.InterchainTxWrappers {
+func (router *InterchainRouter) generateUnionInterchainTxWrappers(ret map[string]*pb.InterchainTxWrapper, block *pb.Block, meta *pb.InterchainMeta) *pb.InterchainTxWrappers {
 	wrappers := make([]*pb.InterchainTxWrapper, 0)
 	emptyWrapper := &pb.InterchainTxWrapper{
 		Height:  block.Height(),
@@ -46,7 +46,7 @@ func (router *InterchainRouter) generateUnionInterchainTxWrappers(ret map[bitxid
 		}
 	}
 	for pid, _ := range ret {
-		if _, ok := appchains[string(pid)]; ok {
+		if _, ok := appchains[pid]; ok {
 			delete(ret, pid)
 		}
 	}

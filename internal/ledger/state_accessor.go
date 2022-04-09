@@ -11,130 +11,151 @@ import (
 
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/pb"
+	"github.com/meshplus/eth-kit/ledger"
 )
 
-var _ Ledger = (*ChainLedger)(nil)
+var _ ledger.StateLedger = (*SimpleLedger)(nil)
 
 // GetOrCreateAccount get the account, if not exist, create a new account
-func (l *ChainLedger) GetOrCreateAccount(addr *types.Address) *Account {
-	l.lock.RLock()
-	value, ok := l.accounts[addr.String()]
-	l.lock.RUnlock()
-	if ok {
-		return value
-	}
-
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	if value, ok := l.accounts[addr.String()]; ok {
-		return value
-	}
+func (l *SimpleLedger) GetOrCreateAccount(addr *types.Address) ledger.IAccount {
 	account := l.GetAccount(addr)
-	l.accounts[addr.String()] = account
+	if account == nil {
+		account = newAccount(l.ldb, l.accountCache, addr, l.changer)
+		l.changer.append(createObjectChange{account: addr})
+
+		l.lock.Lock()
+		l.accounts[addr.String()] = account
+		l.lock.Unlock()
+	}
 
 	return account
 }
 
 // GetAccount get account info using account Address, if not found, create a new account
-func (l *ChainLedger) GetAccount(address *types.Address) *Account {
+func (l *SimpleLedger) GetAccount(address *types.Address) ledger.IAccount {
+	addr := address.String()
+
+	l.lock.RLock()
+	value, ok := l.accounts[addr]
+	l.lock.RUnlock()
+	if ok {
+		return value
+	}
+
 	account := newAccount(l.ldb, l.accountCache, address, l.changer)
 
 	if innerAccount, ok := l.accountCache.getInnerAccount(address); ok {
 		account.originAccount = innerAccount
+		if !bytes.Equal(innerAccount.CodeHash, nil) {
+			code, okCode := l.accountCache.getCode(address)
+			if !okCode {
+				code = l.ldb.Get(compositeKey(codeKey, address))
+			}
+			account.originCode = code
+		}
+		l.lock.Lock()
+		l.accounts[addr] = account
+		l.lock.Unlock()
 		return account
 	}
 
 	if data := l.ldb.Get(compositeKey(accountKey, address)); data != nil {
-		account.originAccount = &innerAccount{Balance: big.NewInt(0)}
+		account.originAccount = &ledger.InnerAccount{Balance: big.NewInt(0)}
 		if err := account.originAccount.Unmarshal(data); err != nil {
 			panic(err)
 		}
+		if !bytes.Equal(account.originAccount.CodeHash, nil) {
+			code := l.ldb.Get(compositeKey(codeKey, address))
+			account.originCode = code
+		}
+		l.lock.Lock()
+		l.accounts[addr] = account
+		l.lock.Unlock()
 		return account
 	}
 
-	l.changer.append(createObjectChange{account: address})
-	return account
+	return nil
 }
 
-func (l *ChainLedger) setAccount(account *Account) {
+func (l *SimpleLedger) setAccount(account ledger.IAccount) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	l.accounts[account.Addr.String()] = account
+	l.accounts[account.GetAddress().String()] = account
 }
 
 // GetBalanec get account balance using account Address
-func (l *ChainLedger) GetBalance(addr *types.Address) *big.Int {
+func (l *SimpleLedger) GetBalance(addr *types.Address) *big.Int {
 	account := l.GetOrCreateAccount(addr)
 	return account.GetBalance()
 }
 
 // SetBalance set account balance
-func (l *ChainLedger) SetBalance(addr *types.Address, value *big.Int) {
+func (l *SimpleLedger) SetBalance(addr *types.Address, value *big.Int) {
 	account := l.GetOrCreateAccount(addr)
 	account.SetBalance(value)
 }
 
-func (l *ChainLedger) SubBalance(addr *types.Address, value *big.Int) {
+func (l *SimpleLedger) SubBalance(addr *types.Address, value *big.Int) {
 	account := l.GetOrCreateAccount(addr)
-	if !account.isEmpty() {
+	if !account.IsEmpty() {
 		account.SubBalance(value)
 	}
 }
 
-func (l *ChainLedger) AddBalance(addr *types.Address, value *big.Int) {
+func (l *SimpleLedger) AddBalance(addr *types.Address, value *big.Int) {
 	account := l.GetOrCreateAccount(addr)
 	account.AddBalance(value)
 }
 
 // GetState get account state value using account Address and key
-func (l *ChainLedger) GetState(addr *types.Address, key []byte) (bool, []byte) {
+func (l *SimpleLedger) GetState(addr *types.Address, key []byte) (bool, []byte) {
 	account := l.GetOrCreateAccount(addr)
 	return account.GetState(key)
 }
 
-func (l *ChainLedger) GetCommittedState(addr *types.Address, key []byte) []byte {
+func (l *SimpleLedger) GetCommittedState(addr *types.Address, key []byte) []byte {
 	account := l.GetOrCreateAccount(addr)
-	if account.isEmpty() {
+	if account.IsEmpty() {
 		return (&types.Hash{}).Bytes()
 	}
 	return account.GetCommittedState(key)
 }
 
 // SetState set account state value using account Address and key
-func (l *ChainLedger) SetState(addr *types.Address, key []byte, v []byte) {
+func (l *SimpleLedger) SetState(addr *types.Address, key []byte, v []byte) {
 	account := l.GetOrCreateAccount(addr)
 	account.SetState(key, v)
 }
 
 // AddState add account state value using account Address and key
-func (l *ChainLedger) AddState(addr *types.Address, key []byte, v []byte) {
+func (l *SimpleLedger) AddState(addr *types.Address, key []byte, v []byte) {
 	account := l.GetOrCreateAccount(addr)
 	account.AddState(key, v)
 }
 
 // SetCode set contract code
-func (l *ChainLedger) SetCode(addr *types.Address, code []byte) {
+func (l *SimpleLedger) SetCode(addr *types.Address, code []byte) {
 	account := l.GetOrCreateAccount(addr)
 	account.SetCodeAndHash(code)
 }
 
 // GetCode get contract code
-func (l *ChainLedger) GetCode(addr *types.Address) []byte {
+func (l *SimpleLedger) GetCode(addr *types.Address) []byte {
 	account := l.GetOrCreateAccount(addr)
 	return account.Code()
 }
 
-func (l *ChainLedger) GetCodeHash(addr *types.Address) *types.Hash {
+func (l *SimpleLedger) GetCodeHash(addr *types.Address) *types.Hash {
 	account := l.GetOrCreateAccount(addr)
-	if account.isEmpty() {
+	if account.IsEmpty() {
 		return &types.Hash{}
 	}
 	return types.NewHash(account.CodeHash())
 }
 
-func (l *ChainLedger) GetCodeSize(addr *types.Address) int {
+func (l *SimpleLedger) GetCodeSize(addr *types.Address) int {
 	account := l.GetOrCreateAccount(addr)
-	if !account.isEmpty() {
+	if !account.IsEmpty() {
 		if code := account.Code(); code != nil {
 			return len(code)
 		}
@@ -142,7 +163,7 @@ func (l *ChainLedger) GetCodeSize(addr *types.Address) int {
 	return 0
 }
 
-func (l *ChainLedger) AddRefund(gas uint64) {
+func (l *SimpleLedger) AddRefund(gas uint64) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
@@ -150,7 +171,7 @@ func (l *ChainLedger) AddRefund(gas uint64) {
 	l.refund += gas
 }
 
-func (l *ChainLedger) SubRefund(gas uint64) {
+func (l *SimpleLedger) SubRefund(gas uint64) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
@@ -161,7 +182,7 @@ func (l *ChainLedger) SubRefund(gas uint64) {
 	l.refund -= gas
 }
 
-func (l *ChainLedger) GetRefund() uint64 {
+func (l *SimpleLedger) GetRefund() uint64 {
 	l.lock.RLock()
 	defer l.lock.RUnlock()
 
@@ -169,37 +190,42 @@ func (l *ChainLedger) GetRefund() uint64 {
 }
 
 // GetNonce get account nonce
-func (l *ChainLedger) GetNonce(addr *types.Address) uint64 {
+func (l *SimpleLedger) GetNonce(addr *types.Address) uint64 {
 	account := l.GetOrCreateAccount(addr)
 	return account.GetNonce()
 }
 
 // SetNonce set account nonce
-func (l *ChainLedger) SetNonce(addr *types.Address, nonce uint64) {
+func (l *SimpleLedger) SetNonce(addr *types.Address, nonce uint64) {
 	account := l.GetOrCreateAccount(addr)
 	account.SetNonce(nonce)
 }
 
 // QueryByPrefix query value using key
-func (l *ChainLedger) QueryByPrefix(addr *types.Address, prefix string) (bool, [][]byte) {
+func (l *SimpleLedger) QueryByPrefix(addr *types.Address, prefix string) (bool, [][]byte) {
 	account := l.GetOrCreateAccount(addr)
 	return account.Query(prefix)
 }
 
-func (l *ChainLedger) Clear() {
+func (l *SimpleLedger) Clear() {
 	l.events = sync.Map{}
-	l.accounts = make(map[string]*Account)
+
+	l.lock.Lock()
+	l.accounts = make(map[string]ledger.IAccount)
+	l.lock.Unlock()
 }
 
-// FlushDirtyDataAndComputeJournal gets dirty accounts and computes block journal
-func (l *ChainLedger) FlushDirtyDataAndComputeJournal() (map[string]*Account, *BlockJournal) {
-	dirtyAccounts := make(map[string]*Account)
+// FlushDirtyData gets dirty accounts and computes block journal
+func (l *SimpleLedger) FlushDirtyData() (map[string]ledger.IAccount, *types.Hash) {
+	dirtyAccounts := make(map[string]ledger.IAccount)
 	var dirtyAccountData []byte
-	var journals []*journal
+	var journals []*blockJournalEntry
 	var sortedAddr []string
 	accountData := make(map[string][]byte)
 
-	for addr, account := range l.accounts {
+	l.lock.RLock()
+	for addr, acc := range l.accounts {
+		account := acc.(*SimpleAccount)
 		journal := account.getJournalIfModified()
 		if journal != nil {
 			journals = append(journals, journal)
@@ -208,6 +234,7 @@ func (l *ChainLedger) FlushDirtyDataAndComputeJournal() (map[string]*Account, *B
 			dirtyAccounts[addr] = account
 		}
 	}
+	l.lock.RUnlock()
 
 	sort.Strings(sortedAddr)
 	for _, addr := range sortedAddr {
@@ -220,26 +247,27 @@ func (l *ChainLedger) FlushDirtyDataAndComputeJournal() (map[string]*Account, *B
 		Journals:    journals,
 		ChangedHash: types.NewHash(journalHash[:]),
 	}
-
+	l.blockJournals.Store(blockJournal.ChangedHash.String(), blockJournal)
 	l.prevJnlHash = blockJournal.ChangedHash
 	l.Clear()
 	l.accountCache.add(dirtyAccounts)
 
-	return dirtyAccounts, blockJournal
+	return dirtyAccounts, blockJournal.ChangedHash
 }
 
 // Commit commit the state
-func (l *ChainLedger) Commit(height uint64, accounts map[string]*Account, blockJournal *BlockJournal) error {
+func (l *SimpleLedger) Commit(height uint64, accounts map[string]ledger.IAccount, stateRoot *types.Hash) error {
 	ldbBatch := l.ldb.NewBatch()
 
-	for _, account := range accounts {
-		if account.suicided {
+	for _, acc := range accounts {
+		account := acc.(*SimpleAccount)
+		if account.Suicided() {
 			if data := l.ldb.Get(compositeKey(accountKey, account.Addr)); data != nil {
 				ldbBatch.Delete(compositeKey(accountKey, account.Addr))
 			}
 			continue
 		}
-		if innerAccountChanged(account.originAccount, account.dirtyAccount) {
+		if ledger.InnerAccountChanged(account.originAccount, account.dirtyAccount) {
 			data, err := account.dirtyAccount.Marshal()
 			if err != nil {
 				panic(err)
@@ -251,7 +279,13 @@ func (l *ChainLedger) Commit(height uint64, accounts map[string]*Account, blockJ
 			if account.dirtyCode != nil {
 				ldbBatch.Put(compositeKey(codeKey, account.Addr), account.dirtyCode)
 			} else {
-				ldbBatch.Delete(compositeKey(codeKey, account.Addr))
+				if account.dirtyAccount != nil {
+					if !bytes.Equal(account.originAccount.CodeHash, account.dirtyAccount.CodeHash) {
+						if bytes.Equal(account.dirtyAccount.CodeHash, nil) {
+							ldbBatch.Delete(compositeKey(codeKey, account.Addr))
+						}
+					}
+				}
 			}
 		}
 
@@ -275,9 +309,15 @@ func (l *ChainLedger) Commit(height uint64, accounts map[string]*Account, blockJ
 		})
 	}
 
+	value, ok := l.blockJournals.Load(stateRoot.String())
+	if !ok {
+		return fmt.Errorf("cannot get block journal for block %d", height)
+	}
+
+	blockJournal := value.(*BlockJournal)
 	data, err := json.Marshal(blockJournal)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal block journal error: %w", err)
 	}
 
 	ldbBatch.Put(compositeKey(journalKey, height), data)
@@ -298,18 +338,25 @@ func (l *ChainLedger) Commit(height uint64, accounts map[string]*Account, blockJ
 
 	l.accountCache.remove(accounts)
 
+	if height > 10 {
+		if err := l.removeJournalsBeforeBlock(height - 10); err != nil {
+			return fmt.Errorf("remove journals before block %d failed: %w", height-10, err)
+		}
+	}
+	l.blockJournals = sync.Map{}
+
 	return nil
 }
 
 // Version returns the current version
-func (l *ChainLedger) Version() uint64 {
+func (l *SimpleLedger) Version() uint64 {
 	l.journalMutex.RLock()
 	defer l.journalMutex.RUnlock()
 
 	return l.maxJnlHeight
 }
 
-func (l *ChainLedger) rollbackState(height uint64) error {
+func (l *SimpleLedger) RollbackState(height uint64) error {
 	l.journalMutex.Lock()
 	defer l.journalMutex.Unlock()
 
@@ -338,7 +385,7 @@ func (l *ChainLedger) rollbackState(height uint64) error {
 		}
 
 		for _, journal := range blockJournal.Journals {
-			journal.revert(batch)
+			revertJournal(journal, batch)
 		}
 
 		batch.Delete(compositeKey(journalKey, i))
@@ -358,43 +405,43 @@ func (l *ChainLedger) rollbackState(height uint64) error {
 	return nil
 }
 
-func (l *ChainLedger) Suiside(addr *types.Address) bool {
-	account := l.GetAccount(addr)
+func (l *SimpleLedger) Suiside(addr *types.Address) bool {
+	account := l.GetAccount(addr).(*SimpleAccount)
 	l.changer.append(suicideChange{
 		account:     addr,
-		prev:        account.suicided,
+		prev:        account.Suicided(),
 		prevbalance: new(big.Int).Set(account.GetBalance()),
 	})
-	account.markSuicided()
+	account.SetSuicided(true)
 	account.SetBalance(new(big.Int))
 
 	return true
 }
 
-func (l *ChainLedger) HasSuiside(addr *types.Address) bool {
+func (l *SimpleLedger) HasSuiside(addr *types.Address) bool {
 	account := l.GetOrCreateAccount(addr)
-	if account.isEmpty() {
+	if account.IsEmpty() {
 		return false
 	}
-	return account.suicided
+	return account.Suicided()
 }
 
-func (l *ChainLedger) Exist(addr *types.Address) bool {
-	return !l.GetOrCreateAccount(addr).isEmpty()
+func (l *SimpleLedger) Exist(addr *types.Address) bool {
+	return !l.GetOrCreateAccount(addr).IsEmpty()
 }
 
-func (l *ChainLedger) Empty(addr *types.Address) bool {
-	return l.GetOrCreateAccount(addr).isEmpty()
+func (l *SimpleLedger) Empty(addr *types.Address) bool {
+	return l.GetOrCreateAccount(addr).IsEmpty()
 }
 
-func (l *ChainLedger) Snapshot() int {
+func (l *SimpleLedger) Snapshot() int {
 	id := l.nextRevisionId
 	l.nextRevisionId++
 	l.validRevisions = append(l.validRevisions, revision{id, l.changer.length()})
 	return id
 }
 
-func (l *ChainLedger) RevertToSnapshot(revid int) {
+func (l *SimpleLedger) RevertToSnapshot(revid int) {
 	idx := sort.Search(len(l.validRevisions), func(i int) bool {
 		return l.validRevisions[i].id >= revid
 	})
@@ -407,7 +454,7 @@ func (l *ChainLedger) RevertToSnapshot(revid int) {
 	l.validRevisions = l.validRevisions[:idx]
 }
 
-func (l *ChainLedger) ClearChangerAndRefund() {
+func (l *SimpleLedger) ClearChangerAndRefund() {
 	if len(l.changer.changes) > 0 {
 		l.changer = newChanger()
 		l.refund = 0
@@ -416,13 +463,13 @@ func (l *ChainLedger) ClearChangerAndRefund() {
 	l.nextRevisionId = 0
 }
 
-func (l *ChainLedger) AddAddressToAccessList(addr types.Address) {
+func (l *SimpleLedger) AddAddressToAccessList(addr types.Address) {
 	if l.accessList.AddAddress(addr) {
 		l.changer.append(accessListAddAccountChange{&addr})
 	}
 }
 
-func (l *ChainLedger) AddSlotToAccessList(addr types.Address, slot types.Hash) {
+func (l *SimpleLedger) AddSlotToAccessList(addr types.Address, slot types.Hash) {
 	addrMod, slotMod := l.accessList.AddSlot(addr, slot)
 	if addrMod {
 		l.changer.append(accessListAddAccountChange{&addr})
@@ -435,7 +482,7 @@ func (l *ChainLedger) AddSlotToAccessList(addr types.Address, slot types.Hash) {
 	}
 }
 
-func (l *ChainLedger) PrepareAccessList(sender types.Address, dst *types.Address, precompiles []types.Address, list AccessList) {
+func (l *SimpleLedger) PrepareAccessList(sender types.Address, dst *types.Address, precompiles []types.Address, list ledger.AccessTupleList) {
 	l.AddAddressToAccessList(sender)
 
 	if dst != nil {
@@ -453,15 +500,15 @@ func (l *ChainLedger) PrepareAccessList(sender types.Address, dst *types.Address
 	}
 }
 
-func (l *ChainLedger) AddressInAccessList(addr types.Address) bool {
+func (l *SimpleLedger) AddressInAccessList(addr types.Address) bool {
 	return l.accessList.ContainsAddress(addr)
 }
 
-func (l *ChainLedger) SlotInAccessList(addr types.Address, slot types.Hash) (bool, bool) {
+func (l *SimpleLedger) SlotInAccessList(addr types.Address, slot types.Hash) (bool, bool) {
 	return l.accessList.Contains(addr, slot)
 }
 
-func (l *ChainLedger) AddPreimage(hash types.Hash, preimage []byte) {
+func (l *SimpleLedger) AddPreimage(hash types.Hash, preimage []byte) {
 	if _, ok := l.preimages[hash]; !ok {
 		l.changer.append(addPreimageChange{hash: hash})
 		pi := make([]byte, len(preimage))
@@ -470,12 +517,13 @@ func (l *ChainLedger) AddPreimage(hash types.Hash, preimage []byte) {
 	}
 }
 
-func (l *ChainLedger) PrepareBlock(hash *types.Hash) {
+func (l *SimpleLedger) PrepareBlock(hash *types.Hash, height uint64) {
 	l.logs = NewEvmLogs()
 	l.logs.bhash = hash
+	l.blockHeight = height
 }
 
-func (l *ChainLedger) AddLog(log *pb.EvmLog) {
+func (l *SimpleLedger) AddLog(log *pb.EvmLog) {
 	l.changer.append(addLogChange{txHash: l.logs.thash})
 
 	log.TxHash = l.logs.thash
@@ -486,11 +534,11 @@ func (l *ChainLedger) AddLog(log *pb.EvmLog) {
 	l.logs.logSize++
 }
 
-func (l *ChainLedger) GetLogs(hash types.Hash) []*pb.EvmLog {
+func (l *SimpleLedger) GetLogs(hash types.Hash) []*pb.EvmLog {
 	return l.logs.logs[hash]
 }
 
-func (l *ChainLedger) Logs() []*pb.EvmLog {
+func (l *SimpleLedger) Logs() []*pb.EvmLog {
 	var logs []*pb.EvmLog
 	for _, lgs := range l.logs.logs {
 		logs = append(logs, lgs...)

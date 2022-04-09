@@ -3,7 +3,9 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Rican7/retry"
@@ -22,25 +24,25 @@ import (
 func governanceCMD() cli.Command {
 	return cli.Command{
 		Name:  "governance",
-		Usage: "governance command",
+		Usage: "BitXHub governance command",
 		Subcommands: cli.Commands{
 			cli.Command{
 				Name:  "vote",
-				Usage: "vote to a proposal",
+				Usage: "Vote to a proposal",
 				Flags: []cli.Flag{
 					cli.StringFlag{
 						Name:     "id",
-						Usage:    "proposal id",
+						Usage:    "Specify proposal id",
 						Required: true,
 					},
 					cli.StringFlag{
 						Name:     "info",
-						Usage:    "voting information, approve or reject",
+						Usage:    "Specify voting information, approve or reject",
 						Required: true,
 					},
 					cli.StringFlag{
 						Name:     "reason",
-						Usage:    "reason to vote",
+						Usage:    "Specify reason to vote",
 						Required: true,
 					},
 				},
@@ -48,35 +50,35 @@ func governanceCMD() cli.Command {
 			},
 			cli.Command{
 				Name:  "proposal",
-				Usage: "proposal manage command",
+				Usage: "Proposal manage command",
 				Subcommands: cli.Commands{
 					cli.Command{
 						Name:  "query",
-						Usage: "query proposals based on the condition",
+						Usage: "Query proposals based on the condition",
 						Flags: []cli.Flag{
 							cli.StringFlag{
 								Name:     "id",
-								Usage:    "proposal id",
+								Usage:    "Specify proposal id",
 								Required: false,
 							},
 							cli.StringFlag{
 								Name:     "type",
-								Usage:    "proposal type, currently only AppchainMgr is supported",
+								Usage:    "Specify proposal type, currently only appchain_mgr, rule_mgr, node_mgr, service_mgr, role_mgr, proposal_strategy_mgr and dapp_mgr are supported",
 								Required: false,
 							},
 							cli.StringFlag{
 								Name:     "status",
-								Usage:    "proposal status, one of proposed, approve or reject",
+								Usage:    "Specify proposal status, one of proposed, paused, approve or reject",
 								Required: false,
 							},
 							cli.StringFlag{
 								Name:     "from",
-								Usage:    "the address of the account to which the proposal was made",
+								Usage:    "Specify the address of the account to which the proposal was made",
 								Required: false,
 							},
 							cli.StringFlag{
 								Name:     "objId",
-								Usage:    "the ID of the managed object",
+								Usage:    "Specify the ID of the managed object",
 								Required: false,
 							},
 						},
@@ -84,12 +86,17 @@ func governanceCMD() cli.Command {
 					},
 					cli.Command{
 						Name:  "withdraw",
-						Usage: "withdraw a proposal",
+						Usage: "Withdraw a proposal",
 						Flags: []cli.Flag{
 							cli.StringFlag{
 								Name:     "id",
-								Usage:    "proposal id",
+								Usage:    "Specify proposal id",
 								Required: true,
+							},
+							cli.StringFlag{
+								Name:     "reason",
+								Usage:    "Specify withdraw reason",
+								Required: false,
 							},
 						},
 						Action: withdraw,
@@ -98,16 +105,109 @@ func governanceCMD() cli.Command {
 			},
 			appchainMgrCMD(),
 			ruleMgrCMD(),
+			nodeMgrCMD(),
+			roleMgrCMD(),
+			dappMgrCMD(),
+			serviceMgrCMD(),
+			proposalStrategyCMD(),
+		},
+	}
+}
+
+func proposalStrategyCMD() cli.Command {
+	return cli.Command{
+		Name:  "strategy",
+		Usage: "Proposal strategy command",
+		Subcommands: cli.Commands{
+			cli.Command{
+				Name:  "all",
+				Usage: "Query all proposal strategy",
+				Action: func(ctx *cli.Context) error {
+					receipt, err := invokeBVMContractBySendView(ctx, constant.ProposalStrategyMgrContractAddr.String(), "GetAllProposalStrategy")
+					if err != nil {
+						return fmt.Errorf("invoke BVM contract failed when get all proposal strategy: %w", err)
+					}
+
+					if receipt.IsSuccess() {
+						strategies := make([]*contracts.ProposalStrategy, 0)
+						if err := json.Unmarshal(receipt.Ret, &strategies); err != nil {
+							return fmt.Errorf(err.Error())
+						}
+						printProposalStrategy(strategies)
+					} else {
+						color.Red("get all proposal strategy error: %s\n", string(receipt.Ret))
+					}
+					return nil
+				},
+			},
+			cli.Command{
+				Name:  "update",
+				Usage: "Update proposal strategy",
+				Flags: []cli.Flag{
+					cli.StringFlag{
+						Name:     "module",
+						Usage:    "Specify module name(appchain_mgr, rule_mgr, node_mgr, service_mgr, role_mgr, proposal_strategy_mgr, dapp_mgr, all_mgr)",
+						Required: true,
+					},
+					cli.StringFlag{
+						Name:     "typ",
+						Usage:    "Specify proposal strategy(SimpleMajority or ZeroPermission)",
+						Value:    "SimpleMajority",
+						Required: false,
+					},
+					cli.StringFlag{
+						Name:  "extra",
+						Usage: "Specify expression of strategy. In this expression, 'a' represents the number of people approve, 'r' represents the number of people against, and 't' represents the total number of people who can vote.",
+						//Usage:    "extra info of strategy. For example, SimpleMajority strategy require a majority ratio and it should be in the [0, 1] range.",
+						Value:    "a > 0.5 * t",
+						Required: false,
+					},
+					cli.StringFlag{
+						Name:     "reason",
+						Usage:    "Specify Update reason",
+						Required: false,
+					},
+				},
+				Action: func(ctx *cli.Context) error {
+					module := ctx.String("module")
+					typ := ctx.String("typ")
+					extra := ctx.String("extra")
+					reason := ctx.String("reason")
+
+					var receipt *pb.Receipt
+					var err error
+					if module == repo.AllMgr {
+						receipt, err = invokeBVMContract(ctx, constant.ProposalStrategyMgrContractAddr.Address().String(), "UpdateAllProposalStrategy",
+							pb.String(typ), pb.String(extra), pb.String(reason))
+					} else {
+						receipt, err = invokeBVMContract(ctx, constant.ProposalStrategyMgrContractAddr.Address().String(), "UpdateProposalStrategy",
+							pb.String(module), pb.String(typ), pb.String(extra), pb.String(reason))
+					}
+
+					if err != nil {
+						return fmt.Errorf("invoke BVM contract failed when get all proposal strategy: %w", err)
+					}
+
+					if receipt.IsSuccess() {
+						proposalId := gjson.Get(string(receipt.Ret), "proposal_id").String()
+						color.Green("proposal id is %s\n", proposalId)
+					} else {
+						color.Red("update proposal strategy error: %s\n", string(receipt.Ret))
+					}
+					return nil
+				},
+			},
 		},
 	}
 }
 
 func withdraw(ctx *cli.Context) error {
 	id := ctx.String("id")
+	reason := ctx.String("reason")
 
-	receipt, err := invokeBVMContract(ctx, constant.GovernanceContractAddr.String(), "WithdrawProposal", pb.String(id))
+	receipt, err := invokeBVMContract(ctx, constant.GovernanceContractAddr.String(), "WithdrawProposal", pb.String(id), pb.String(reason))
 	if err != nil {
-		return err
+		return fmt.Errorf("invoke BVM contract failed when withdraw proposal %s for %s: %w", id, reason, err)
 	}
 
 	if receipt.IsSuccess() {
@@ -129,7 +229,7 @@ func vote(ctx *cli.Context) error {
 
 	receipt, err := invokeBVMContract(ctx, constant.GovernanceContractAddr.String(), "Vote", pb.String(id), pb.String(info), pb.String(reason))
 	if err != nil {
-		return err
+		return fmt.Errorf("invoke BVM contract failed when vote proposal %s to %s for %s: %w", id, info, reason, err)
 	}
 
 	if receipt.IsSuccess() {
@@ -148,12 +248,12 @@ func getProposals(ctx *cli.Context) error {
 	objId := ctx.String("objId")
 
 	if err := checkProposalArgs(id, typ, status, from, objId); err != nil {
-		return err
+		return fmt.Errorf("check proposal args failed \" id=%s,typ=%s,status=%s,from=%s,objID=%s \": %w", id, typ, status, from, objId, err)
 	}
 
 	repoRoot, err := repo.PathRootWithDefault(ctx.GlobalString("repo"))
 	if err != nil {
-		return err
+		return fmt.Errorf("pathRootWithDefault error: %w", err)
 	}
 	keyPath := repo.GetKeyPath(repoRoot)
 
@@ -217,13 +317,17 @@ func checkProposalArgs(id, typ, status, from, objId string) error {
 		typ != string(contracts.AppchainMgr) &&
 		typ != string(contracts.RuleMgr) &&
 		typ != string(contracts.NodeMgr) &&
-		typ != string(contracts.ServiceMgr) {
+		typ != string(contracts.ServiceMgr) &&
+		typ != string(contracts.ProposalStrategyMgr) &&
+		typ != string(contracts.RoleMgr) &&
+		typ != string(contracts.DappMgr) {
 		return fmt.Errorf("illegal proposal type")
 	}
 	if status != "" &&
 		status != string(contracts.PROPOSED) &&
-		status != string(contracts.APPOVED) &&
-		status != string(contracts.REJECTED) {
+		status != string(contracts.APPROVED) &&
+		status != string(contracts.REJECTED) &&
+		status != string(contracts.PAUSED) {
 		return fmt.Errorf("illegal proposal status")
 	}
 	return nil
@@ -245,15 +349,15 @@ func getdDuplicateProposals(ps1, ps2 []contracts.Proposal) []contracts.Proposal 
 	return proposals
 }
 
-func getProposalsByConditions(ctx *cli.Context, keyPath string, menthod string, arg string) ([]contracts.Proposal, error) {
-	receipt, err := invokeBVMContract(ctx, constant.GovernanceContractAddr.String(), menthod, pb.String(arg))
+func getProposalsByConditions(ctx *cli.Context, keyPath string, method string, arg string) ([]contracts.Proposal, error) {
+	receipt, err := invokeBVMContractBySendView(ctx, constant.GovernanceContractAddr.String(), method, pb.String(arg))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invoke BVM contract failed when get proposal by condition %s, %w", arg, err)
 	}
 
 	if receipt.IsSuccess() {
 		proposals := make([]contracts.Proposal, 0)
-		if menthod == "GetProposal" {
+		if method == "GetProposal" {
 			proposal := contracts.Proposal{}
 			err = json.Unmarshal(receipt.Ret, &proposal)
 			if err != nil {
@@ -276,7 +380,7 @@ func getProposalsByConditions(ctx *cli.Context, keyPath string, menthod string, 
 
 func printProposal(proposals []contracts.Proposal) {
 	var table [][]string
-	table = append(table, []string{"Id", "ManagedObjectId", "Type", "EventType", "Status", "Approve/Reject", "Electorate/Threshold", "Description", "EndReason"})
+	table = append(table, []string{"Id", "ManagedObjectId", "Type", "EventType", "Status", "A/R", "IE/AE", "Special/Super", "StrategyExp", "CreateTime", "Reason", "EndReason", "extra"})
 
 	for _, pro := range proposals {
 		table = append(table, []string{
@@ -285,14 +389,23 @@ func printProposal(proposals []contracts.Proposal) {
 			string(pro.Typ),
 			string(pro.EventType),
 			string(pro.Status),
-			strconv.Itoa(int(pro.ApproveNum)) + "/" + strconv.Itoa(int(pro.AgainstNum)),
-			strconv.Itoa(int(pro.ElectorateNum)) + "/" + strconv.Itoa(int(pro.ThresholdNum)),
-			pro.Des,
-			pro.EndReason,
+			fmt.Sprintf("%s/%s", strconv.Itoa(int(pro.ApproveNum)), strconv.Itoa(int(pro.AgainstNum))),
+			fmt.Sprintf("%s/%s", strconv.Itoa(int(pro.InitialElectorateNum)), strconv.Itoa(int(pro.AvaliableElectorateNum))),
+			fmt.Sprintf("%s/%s", strconv.FormatBool(pro.IsSpecial), strconv.FormatBool(pro.IsSuperAdminVoted)),
+			pro.StrategyExpression,
+			strconv.Itoa(int(pro.CreateTime)),
+			pro.SubmitReason,
+			string(pro.EndReason),
+			string(pro.Extra),
 		})
 	}
 
+	fmt.Println("========================================================================================")
 	PrintTable(table, true)
+	fmt.Println("========================================================================================")
+	fmt.Println("* A/R：approve num / reject num")
+	fmt.Println("* IE/AE/TE：the total number of electorate at the time of the initial proposal / the number of available electorate currently /the minimum threshold for votes to take effect")
+	fmt.Println("* Special/Super：is special proposal / is super admin voted")
 }
 
 func PrintTable(rows [][]string, header bool) {
@@ -326,32 +439,35 @@ func addRow(t *tabby.Tabby, rawLine []string, header bool) {
 func invokeBVMContract(ctx *cli.Context, contractAddr string, method string, args ...*pb.Arg) (*pb.Receipt, error) {
 	repoRoot, err := repo.PathRootWithDefault(ctx.GlobalString("repo"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pathRootWithDefault error: %w", err)
 	}
 	keyPath := repo.GetKeyPath(repoRoot)
 
-	resp, err := sendTx(ctx, contractAddr, 0, uint64(pb.TransactionData_INVOKE), keyPath, uint64(pb.TransactionData_BVM), method, args...)
+	resp, err := sendTxOrView(ctx, sendTx, contractAddr, big.NewInt(0), uint64(pb.TransactionData_INVOKE), keyPath, uint64(pb.TransactionData_BVM), method, args...)
 	if err != nil {
 		return nil, fmt.Errorf("send transaction error: %s", err.Error())
+	}
+	if strings.Contains(string(resp), "error") {
+		return nil, fmt.Errorf("send transaction error: %s", string(resp))
 	}
 
 	hash := gjson.Get(string(resp), "tx_hash").String()
 
 	var data []byte
 	if err = retry.Retry(func(attempt uint) error {
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 		data, err = getTxReceipt(ctx, hash)
 		if err != nil {
-			fmt.Println("get transaction receipt error: " + err.Error() + "... retry later")
+			fmt.Printf("the tx receipt has not been received yet: %v... retry later \n", err)
 			return err
 		} else {
 			m := make(map[string]interface{})
 			if err := json.Unmarshal(data, &m); err != nil {
-				fmt.Println("get transaction receipt error: " + err.Error() + "... retry later")
+				fmt.Printf("the tx receipt has not been received yet: %v... retry later \n", err)
 				return err
 			}
 			if errInfo, ok := m["error"]; ok {
-				fmt.Println("get transaction receipt error: " + errInfo.(string) + "... retry later")
+				fmt.Printf("the tx receipt has not been received yet: %v... retry later \n", errInfo.(string))
 				return fmt.Errorf(errInfo.(string))
 			}
 			return nil
@@ -367,5 +483,48 @@ func invokeBVMContract(ctx *cli.Context, contractAddr string, method string, arg
 		return nil, fmt.Errorf("jsonpb unmarshal receipt error: %w", err)
 	}
 
+	if !receipt.IsSuccess() {
+		return nil, fmt.Errorf(string(receipt.Ret))
+	}
 	return receipt, nil
+}
+
+func invokeBVMContractBySendView(ctx *cli.Context, contractAddr string, method string, args ...*pb.Arg) (*pb.Receipt, error) {
+	repoRoot, err := repo.PathRootWithDefault(ctx.GlobalString("repo"))
+	if err != nil {
+		return nil, fmt.Errorf("pathRootWithDefault error: %w", err)
+	}
+	keyPath := repo.GetKeyPath(repoRoot)
+
+	resp, err := sendTxOrView(ctx, sendView, contractAddr, big.NewInt(0), uint64(pb.TransactionData_INVOKE), keyPath, uint64(pb.TransactionData_BVM), method, args...)
+	if err != nil {
+		return nil, fmt.Errorf("send transaction error: %s", err.Error())
+	}
+
+	m := &runtime.JSONPb{OrigName: true, EmitDefaults: false, EnumsAsInts: true}
+	receipt := &pb.Receipt{}
+	if err = m.Unmarshal(resp, receipt); err != nil {
+		return nil, fmt.Errorf("jsonpb unmarshal receipt error: %w", err)
+	}
+
+	if !receipt.IsSuccess() {
+		return nil, fmt.Errorf(string(receipt.Ret))
+	}
+	return receipt, nil
+}
+
+func printProposalStrategy(strategies []*contracts.ProposalStrategy) {
+	var table [][]string
+	table = append(table, []string{"module", "strategy", "Extra", "Status"})
+	for _, r := range strategies {
+
+		table = append(table, []string{
+			r.Module,
+			string(r.Typ),
+			r.Extra,
+			string(r.Status),
+		})
+	}
+
+	PrintTable(table, true)
 }

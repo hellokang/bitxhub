@@ -2,13 +2,14 @@ package etcdraft
 
 import (
 	"encoding/binary"
+	"fmt"
 	"sort"
 	"time"
 
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/meshplus/bitxhub-core/order"
 	"github.com/meshplus/bitxhub-model/pb"
-	"github.com/meshplus/bitxhub/pkg/order"
 	raftproto "github.com/meshplus/bitxhub/pkg/order/etcdraft/proto"
 	"github.com/sirupsen/logrus"
 )
@@ -24,7 +25,7 @@ func generateRaftPeers(config *order.Config) ([]raft.Peer, error) {
 	for id, vpInfo := range config.Nodes {
 		vpIngoBytes, err := vpInfo.Marshal()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("mashal vp info error: %w", err)
 		}
 		peers = append(peers, raft.Peer{ID: id, Context: vpIngoBytes})
 	}
@@ -88,6 +89,9 @@ func (n *Node) entriesToApply(allEntries []raftpb.Entry) (entriesToApply []raftp
 	if n.appliedIndex-firstIdx+1 < uint64(len(allEntries)) {
 		entriesToApply = allEntries[n.appliedIndex-firstIdx+1:]
 	}
+	if len(entriesToApply) > 0 {
+		n.logger.Infof("start index:%d, end index:%d", entriesToApply[0].Index, entriesToApply[len(entriesToApply)-1].Index)
+	}
 	return entriesToApply
 }
 
@@ -124,13 +128,13 @@ func (n *Node) getSnapshot() ([]byte, error) {
 func (n *Node) recoverFromSnapshot() {
 	snapshot, err := n.raftStorage.snap.Load()
 	if err != nil {
-		n.logger.Error(err)
+		n.logger.Errorf("load snapshot failed: %s", err.Error())
 		return
 	}
 	targetChainMeta := &pb.ChainMeta{}
 	err = targetChainMeta.Unmarshal(snapshot.Data)
 	if err != nil {
-		n.logger.Error(err)
+		n.logger.Errorf("unmarshal target chain meta error: %s", err.Error())
 		return
 	}
 
@@ -163,11 +167,15 @@ func (n *Node) recoverFromSnapshot() {
 			}
 		}
 	}
-	syncBlocks()
-	if n.lastExec != targetChainMeta.Height {
-		n.logger.Warnf("The lastExec is %d, but not equal the target block height %d", n.lastExec, targetChainMeta.Height)
+
+	for {
 		syncBlocks()
+		if n.lastExec == targetChainMeta.Height {
+			break
+		}
+		n.logger.Warnf("The lastExec is %d, but not equal the target block height %d", n.lastExec, targetChainMeta.Height)
 	}
+
 	n.appliedIndex = snapshot.Metadata.Index
 	n.snapshotIndex = snapshot.Metadata.Index
 }

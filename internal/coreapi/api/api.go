@@ -4,10 +4,9 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/pb"
-	"github.com/meshplus/bitxhub/internal/ledger"
 	"github.com/meshplus/bitxhub/internal/model/events"
 	"github.com/meshplus/bitxhub/pkg/peermgr"
-	"github.com/meshplus/bitxid"
+	"github.com/meshplus/eth-kit/ledger"
 )
 
 //go:generate mockgen -destination mock_api/mock_api.go -package mock_api -source api.go
@@ -17,6 +16,7 @@ type CoreAPI interface {
 	Chain() ChainAPI
 	Feed() FeedAPI
 	Account() AccountAPI
+	Audit() AuditAPI
 }
 
 type BrokerAPI interface {
@@ -30,12 +30,13 @@ type BrokerAPI interface {
 	GetPendingNonceByAccount(account string) uint64
 	GetPendingTransactions(max int) []pb.Transaction
 	GetPoolTransaction(hash *types.Hash) pb.Transaction
+	GetStateLedger() ledger.StateLedger
 
 	// AddPier
-	AddPier(did bitxid.DID, pierID string, isUnion bool) (chan *pb.InterchainTxWrappers, error)
+	AddPier(pierID string) (chan *pb.InterchainTxWrappers, error)
 
 	// RemovePier
-	RemovePier(did bitxid.DID, pierID string, isUnion bool)
+	RemovePier(pierID string)
 
 	GetBlockHeader(begin, end uint64, ch chan<- *pb.BlockHeader) error
 
@@ -43,9 +44,6 @@ type BrokerAPI interface {
 
 	// OrderReady
 	OrderReady() error
-
-	// DelVPNode delete a vp node by given id.
-	DelVPNode(delID uint64) error
 
 	FetchSignsFromOtherPeers(content string, typ pb.GetMultiSignsRequest_Type) map[string][]byte
 	GetSign(content string, typ pb.GetMultiSignsRequest_Type) (string, []byte, error)
@@ -71,5 +69,10 @@ type FeedAPI interface {
 }
 
 type AccountAPI interface {
-	GetAccount(addr *types.Address) *ledger.Account
+	GetAccount(addr *types.Address) ledger.IAccount
+}
+
+type AuditAPI interface {
+	HandleAuditNodeSubscription(dataCh chan<- *pb.AuditTxInfo, auditNodeID string, blockStart uint64) error
+	SubscribeAuditEvent(chan<- *pb.AuditTxInfo) event.Subscription
 }

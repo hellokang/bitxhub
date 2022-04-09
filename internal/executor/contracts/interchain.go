@@ -2,29 +2,33 @@ package contracts
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	appchainMgr "github.com/meshplus/bitxhub-core/appchain-mgr"
 	"github.com/meshplus/bitxhub-core/boltvm"
-	"github.com/meshplus/bitxhub-core/governance"
-	"github.com/meshplus/bitxhub-kit/crypto"
-	"github.com/meshplus/bitxhub-kit/crypto/asym"
-	"github.com/meshplus/bitxhub-kit/crypto/asym/ecdsa"
+	service_mgr "github.com/meshplus/bitxhub-core/service-mgr"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/constant"
 	"github.com/meshplus/bitxhub-model/pb"
-	"github.com/meshplus/bitxid"
 )
 
 const (
-	AppchainNotAvailable = "appchain not available"
-	InvalidIBTP          = "invalid ibtp"
-	internalError        = "internal server error"
-	ibtpIndexExist       = "index already exists"
-	ibtpIndexWrong       = "wrong index"
+	BitXHubID                  = "bitxhub-id"
+	CurAppchainNotAvailable    = "current appchain not available"
+	TargetAppchainNotAvailable = "target appchain not available"
+	SrcBitXHubNotAvailable     = "source bitxhub not available"
+	TargetBitXHubNotAvailable  = "target bitxhub not available"
+	CurServiceNotAvailable     = "current service not available"
+	TargetServiceNotAvailable  = "target service not available"
+	InvalidIBTP                = "invalid ibtp"
+	InvalidTargetService       = "invalid target service"
+	internalError              = "internal server error"
+	ibtpIndexExist             = "index already exists"
+	ibtpIndexWrong             = "wrong index"
+	DEFAULT_UNION_PIER_ID      = "default_union_pier_id"
+	INTERCHAINSERVICE_PREFIX   = "service"
+	MULTITX_PREFIX             = "multitx"
 )
 
 type InterchainManager struct {
@@ -35,40 +39,62 @@ type BxhValidators struct {
 	Addresses []string `json:"addresses"`
 }
 
-func (x *InterchainManager) Register(method string) *boltvm.Response {
-	interchain, ok := x.getInterchain(method)
+type ChainService struct {
+	BxhId     string `json:"bxh_id"`
+	ChainId   string `json:"chain_id"`
+	ServiceId string `json:"service_id"`
+	IsLocal   bool   `json:"is_local"`
+}
+
+func (cs *ChainService) getFullServiceId() string {
+	return fmt.Sprintf("%s:%s:%s", cs.BxhId, cs.ChainId, cs.ServiceId)
+}
+
+func (cs *ChainService) getChainServiceId() string {
+	return fmt.Sprintf("%s:%s", cs.ChainId, cs.ServiceId)
+}
+
+func (x *InterchainManager) Register(chainServiceID string) *boltvm.Response {
+	bxhID, err := x.getBitXHubID()
+	if err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), err.Error()))
+	}
+
+	fullServiceID := fmt.Sprintf("%s:%s", bxhID, chainServiceID)
+	interchain, ok := x.getInterchain(fullServiceID)
 	if !ok {
-		interchain = &pb.Interchain{
-			ID:                   method,
-			InterchainCounter:    make(map[string]uint64),
-			ReceiptCounter:       make(map[string]uint64),
-			SourceReceiptCounter: make(map[string]uint64),
-		}
-		x.setInterchain(method, interchain)
+		x.setInterchain(fullServiceID, interchain)
 	}
 	body, err := interchain.Marshal()
 	if err != nil {
-		return boltvm.Error(err.Error())
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), err.Error()))
+	}
+
+	if err := x.postAuditInterchainEvent(fullServiceID); err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), fmt.Sprintf("post audit interchain event error: %v", err)))
 	}
 
 	return boltvm.Success(body)
 }
 
 func (x *InterchainManager) DeleteInterchain(id string) *boltvm.Response {
-	x.Delete(AppchainKey(id))
+	x.Delete(serviceKey(id))
+
+	if err := x.postAuditInterchainEvent(id); err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), fmt.Sprintf("post audit interchain event error: %v", err)))
+	}
 	return boltvm.Success(nil)
 }
 
-// GetInterchain returns information of the interchain count, Receipt count and SourceReceipt count by id
+// getInterchain returns information of the interchain count, Receipt count and SourceReceipt count by id
 func (x *InterchainManager) getInterchain(id string) (*pb.Interchain, bool) {
-	interchain := &pb.Interchain{}
-	ok, data := x.Get(AppchainKey(id))
-	if !ok {
-		return nil, false
-	}
+	interchain := &pb.Interchain{ID: id}
+	ok, data := x.Get(serviceKey(id))
 
-	if err := interchain.Unmarshal(data); err != nil {
-		panic(err)
+	if ok {
+		if err := interchain.Unmarshal(data); err != nil {
+			panic(err)
+		}
 	}
 
 	if interchain.InterchainCounter == nil {
@@ -79,420 +105,604 @@ func (x *InterchainManager) getInterchain(id string) (*pb.Interchain, bool) {
 		interchain.ReceiptCounter = make(map[string]uint64)
 	}
 
+	if interchain.SourceInterchainCounter == nil {
+		interchain.SourceInterchainCounter = make(map[string]uint64)
+	}
+
 	if interchain.SourceReceiptCounter == nil {
 		interchain.SourceReceiptCounter = make(map[string]uint64)
 	}
 
-	return interchain, true
+	return interchain, ok
 }
 
-// GetInterchain returns information of the interchain count, Receipt count and SourceReceipt count by id
+// setInterchain set information of the interchain count, Receipt count and SourceReceipt count by id
 func (x *InterchainManager) setInterchain(id string, interchain *pb.Interchain) {
 	data, err := interchain.Marshal()
 	if err != nil {
 		panic(err)
 	}
 
-	x.Set(AppchainKey(id), data)
-}
-
-// Interchain returns information of the interchain count, Receipt count and SourceReceipt count
-func (x *InterchainManager) Interchain(method string) *boltvm.Response {
-	ok, data := x.Get(AppchainKey(method))
-	if !ok {
-		return boltvm.Error(fmt.Errorf("this appchain does not exist").Error())
-	}
-	return boltvm.Success(data)
+	x.Set(serviceKey(id), data)
 }
 
 // GetInterchain returns information of the interchain count, Receipt count and SourceReceipt count by id
 func (x *InterchainManager) GetInterchain(id string) *boltvm.Response {
-	ok, data := x.Get(AppchainKey(id))
+	ok, data := x.Get(serviceKey(id))
 	if !ok {
-		return boltvm.Error(fmt.Errorf("this appchain does not exist").Error())
+		return boltvm.Error(boltvm.InterchainNonexistentInterchainCode, fmt.Sprintf(string(boltvm.InterchainNonexistentInterchainMsg), id))
 	}
 	return boltvm.Success(data)
 }
 
+func (x *InterchainManager) HandleIBTPData(input []byte) *boltvm.Response {
+	ibtp := &pb.IBTP{}
+	err := ibtp.Unmarshal(input)
+	if err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), err.Error()))
+	}
+
+	return x.HandleIBTP(ibtp)
+}
+
 func (x *InterchainManager) HandleIBTP(ibtp *pb.IBTP) *boltvm.Response {
-	if len(strings.Split(ibtp.From, "-")) == 2 {
-		return x.handleUnionIBTP(ibtp)
+	// Pier should retry if checkIBTP failed
+	interchain, targetErr, bxhErr := x.checkIBTP(ibtp)
+	if bxhErr != nil {
+		return boltvm.Error(bxhErr.Code, string(bxhErr.Msg))
 	}
 
-	interchain, _, err := x.checkAppchain(ibtp.From)
+	var change *StatusChange
+	var err error
+	if pb.IBTP_REQUEST == ibtp.Category() {
+		change, err = x.beginTransaction(ibtp, targetErr != nil)
+	} else if pb.IBTP_RESPONSE == ibtp.Category() {
+		change, err = x.reportTransaction(ibtp)
+	}
 	if err != nil {
-		return boltvm.Error(err.Error())
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), err.Error()))
 	}
+	x.notifySrcDst(ibtp, change)
 
-	if err := x.checkIBTP(ibtp, interchain); err != nil {
-		return boltvm.Error(err.Error())
+	ret := x.ProcessIBTP(ibtp, interchain, targetErr != nil)
+
+	if err := x.postAuditInterchainEvent(ibtp.From); err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), fmt.Sprintf("post audit interchain event error: %v", err)))
 	}
-
-	res := boltvm.Success(nil)
-
-	if pb.IBTP_INTERCHAIN == ibtp.Type {
-		res = x.beginTransaction(ibtp)
-	} else if pb.IBTP_RECEIPT_SUCCESS == ibtp.Type || pb.IBTP_RECEIPT_FAILURE == ibtp.Type {
-		res = x.reportTransaction(ibtp)
-	} else if pb.IBTP_ASSET_EXCHANGE_INIT == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REDEEM == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REFUND == ibtp.Type {
-		res = x.handleAssetExchange(ibtp)
+	if err := x.postAuditInterchainEvent(ibtp.To); err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), fmt.Sprintf("post audit interchain event error: %v", err)))
 	}
-
-	if !res.Ok {
-		return res
-	}
-
-	x.ProcessIBTP(ibtp, interchain)
-
-	return res
+	return boltvm.Success(ret)
 }
 
-func (x *InterchainManager) HandleIBTPs(data []byte) *boltvm.Response {
-	ibtps := &pb.IBTPs{}
-	if err := ibtps.Unmarshal(data); err != nil {
-		return boltvm.Error(err.Error())
-	}
+func (x *InterchainManager) checkIBTP(ibtp *pb.IBTP) (*pb.Interchain, *boltvm.BxhError, *boltvm.BxhError) {
+	var targetError *boltvm.BxhError
 
-	// check if all ibtp has the same src address
-	if len(ibtps.Ibtps) == 0 {
-		return boltvm.Error("empty pack of ibtps")
-	}
-	srcChainMethod := ibtps.Ibtps[0].From
-	for _, ibtp := range ibtps.Ibtps {
-		if ibtp.From != srcChainMethod {
-			return boltvm.Error("ibtp pack should have the same src chain method")
-		}
-	}
-
-	interchain, _, err := x.checkAppchain(srcChainMethod)
+	// In the full crossChain, the pier ensures that the format is correct,
+	// if a format problem occurs, the pier is evil, this situation is not credible.
+	srcChainService, err := x.parseChainService(ibtp.From)
 	if err != nil {
-		return boltvm.Error(err.Error())
-	}
-	for _, ibtp := range ibtps.Ibtps {
-		if err := x.checkIBTP(ibtp, interchain); err != nil {
-			return boltvm.Error(err.Error())
-		}
+		return nil, nil, boltvm.BError(boltvm.InterchainInvalidIBTPParseSourceErrorCode, fmt.Sprintf(string(boltvm.InterchainInvalidIBTPParseSourceErrorMsg), err.Error()))
 	}
 
-	if res := x.beginMultiTargetsTransaction(srcChainMethod, ibtps); !res.Ok {
-		return res
-	}
-
-	for _, ibtp := range ibtps.Ibtps {
-		x.ProcessIBTP(ibtp, interchain)
-	}
-
-	return boltvm.Success(nil)
-}
-
-func (x *InterchainManager) checkIBTP(ibtp *pb.IBTP, interchain *pb.Interchain) error {
-	if ibtp.To == "" {
-		return fmt.Errorf("%s: empty destination chain id", InvalidIBTP)
-	}
-
-	if _, ok := x.getInterchain(ibtp.To); !ok {
-		x.Logger().WithField("chain_id", ibtp.To).Debug("target appchain does not exist")
-	}
-
-	srcChainInfo, err := x.getAppchainInfo(ibtp.From)
+	dstChainService, err := x.parseChainService(ibtp.To)
 	if err != nil {
-		return err
+		return nil, nil, boltvm.BError(boltvm.InterchainInvalidIBTPParseDestErrorCode, fmt.Sprintf(string(boltvm.InterchainInvalidIBTPParseDestErrorMsg), err.Error()))
 	}
-	if pb.IBTP_INTERCHAIN == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_INIT == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REDEEM == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REFUND == ibtp.Type {
-		if srcChainInfo.ChainType != appchainMgr.RelaychainType {
-			if err := x.checkPubKeyAndCaller(srcChainInfo.PublicKey); err != nil {
-				return fmt.Errorf("%s: caller is not bind to ibtp from: %w", InvalidIBTP, err)
+
+	interchain, _ := x.getInterchain(srcChainService.getFullServiceId())
+
+	if pb.IBTP_REQUEST == ibtp.Category() {
+		// if src chain service is from appchain registered in current bitxhub, check service index
+		if srcChainService.IsLocal {
+			if err := x.checkSourceAvailability(srcChainService); err != nil {
+				return nil, nil, err
+			}
+
+			// Ordered identifies whether the dst service needs to be invoked sequentially, that is, check index
+			// - Large-scale cross-chain services: not local
+			// - Services that are registered on the bitxhub and need to be called in order: is local && ordered == true
+			// - Bitxhub service: is local && ChainId == BxhId
+			var ordered bool
+			ordered, targetError = x.checkTargetAvailability(srcChainService, dstChainService, ibtp.Type)
+
+			if ordered {
+				if err := checkIndex(interchain.InterchainCounter[dstChainService.getFullServiceId()]+1, ibtp.Index); err != nil {
+					return nil, nil, err
+				}
+			}
+		} else {
+			if !dstChainService.IsLocal {
+				return nil, nil, boltvm.BError(boltvm.InterchainInvalidIBTPNotInCurBXHCode, fmt.Sprintf(string(boltvm.InterchainInvalidIBTPNotInCurBXHMsg), ibtp.ID()))
+			}
+
+			if err := x.checkBitXHubAvailability(srcChainService.BxhId); err != nil {
+				return nil, nil, boltvm.BError(boltvm.InterchainSourceBitXHubNotAvailableCode, fmt.Sprintf(string(boltvm.InterchainSourceBitXHubNotAvailableMsg), srcChainService.BxhId, err))
+			}
+
+			var ordered bool
+			ordered, targetError = x.checkTargetAvailability(srcChainService, dstChainService, ibtp.Type)
+
+			if ordered {
+				if err := checkIndex(interchain.InterchainCounter[dstChainService.getFullServiceId()]+1, ibtp.Index); err != nil {
+					return nil, nil, err
+				}
 			}
 		}
-		idx := interchain.InterchainCounter[ibtp.To]
-		if ibtp.Index <= idx {
-			return fmt.Errorf(fmt.Sprintf("%s: required %d, but %d", ibtpIndexExist, idx+1, ibtp.Index))
-		}
-		if ibtp.Index > idx+1 {
-			return fmt.Errorf(fmt.Sprintf("%s: required %d, but %d", ibtpIndexWrong, idx+1, ibtp.Index))
+	} else if ibtp.Category() == pb.IBTP_RESPONSE {
+		// Situation which need to check the index
+		// - Bitxhub service：dstService == nil
+		// - The dst service needs to be invoked sequentially：dstService.Ordered
+		dstService, _ := x.getServiceByID(dstChainService.getChainServiceId())
+		if dstService == nil || dstService.Ordered {
+			if err := checkIndex(interchain.ReceiptCounter[dstChainService.getFullServiceId()]+1, ibtp.Index); err != nil {
+				return nil, nil, err
+			}
 		}
 	} else {
-		if srcChainInfo.ChainType != appchainMgr.RelaychainType {
-			destChainInfo, err := x.getAppchainInfo(ibtp.To)
+		return nil, nil, boltvm.BError(boltvm.InterchainInvalidIBTPIllegalTypeCode, fmt.Sprintf(string(boltvm.InterchainInvalidIBTPIllegalTypeMsg), ibtp.Type))
+	}
+
+	return interchain, targetError, nil
+}
+
+func (x *InterchainManager) checkSourceAvailability(srcChainService *ChainService) *boltvm.BxhError {
+	//if err := x.checkAppchainAvailability(srcChainService.ChainId); err != nil {
+	//	return boltvm.BError(boltvm.InterchainSourceAppchainNotAvailableCode, fmt.Sprintf(string(boltvm.InterchainSourceAppchainNotAvailableMsg), srcChainService.ChainId, err.Error()))
+	//}
+
+	if err := x.checkServiceAvailability(srcChainService.getChainServiceId()); err != nil {
+		return boltvm.BError(boltvm.InterchainSourceServiceNotAvailableCode, fmt.Sprintf(string(boltvm.InterchainSourceServiceNotAvailableMsg), srcChainService.getChainServiceId(), err.Error()))
+	}
+
+	return nil
+}
+
+// The first return value indicates whether the destination service needs to be invoked in order, that is, whether index needs to be checked
+func (x *InterchainManager) checkTargetAvailability(srcChainService, dstChainService *ChainService, typ pb.IBTP_Type) (bool, *boltvm.BxhError) {
+	ordered := true
+	if pb.IBTP_INTERCHAIN == typ {
+		if dstChainService.IsLocal {
+			if dstChainService.ChainId == dstChainService.BxhId {
+				return true, nil
+			}
+
+			//if err := x.checkAppchainAvailability(dstChainService.ChainId); err != nil {
+			//	return boltvm.BError(boltvm.InterchainTargetAppchainNotAvailableCode, fmt.Sprintf(string(boltvm.InterchainTargetAppchainNotAvailableMsg), dstChainService.ChainId, err.Error()))
+			//}
+
+			dstService, err := x.getServiceByID(dstChainService.getChainServiceId())
 			if err != nil {
-				return err
+				return true, boltvm.BError(boltvm.InterchainTargetServiceNotAvailableCode, fmt.Sprintf(string(boltvm.InterchainTargetServiceNotAvailableMsg), dstChainService.getChainServiceId(), err.Error()))
 			}
-			if err := x.checkPubKeyAndCaller(destChainInfo.PublicKey); err != nil {
-				return fmt.Errorf("%s: caller is not bind to ibtp to", InvalidIBTP)
+			ordered = dstService.Ordered
+
+			if !dstService.IsAvailable() {
+				return ordered, boltvm.BError(boltvm.InterchainTargetServiceNotAvailableCode, fmt.Sprintf(string(boltvm.InterchainTargetServiceNotAvailableMsg), dstChainService.getChainServiceId(), fmt.Sprintf("current status of service %s is %v", dstChainService.getChainServiceId(), dstService.Status)))
+			}
+
+			if !dstService.CheckPermission(srcChainService.getFullServiceId()) {
+				return ordered, boltvm.BError(boltvm.InterchainTargetServiceNoPermissionCode, fmt.Sprintf(string(boltvm.InterchainTargetServiceNoPermissionMsg), srcChainService.getFullServiceId(), dstChainService.getFullServiceId()))
+			}
+		} else {
+			if err := x.checkBitXHubAvailability(dstChainService.BxhId); err != nil {
+				return ordered, boltvm.BError(boltvm.InterchainTargetBitXHubNotAvailableCode, fmt.Sprintf(string(boltvm.InterchainTargetBitXHubNotAvailableMsg), dstChainService.BxhId, err))
 			}
 		}
-		idx := interchain.ReceiptCounter[ibtp.To]
-		if ibtp.Index <= idx {
-			return fmt.Errorf(fmt.Sprintf("%s: required %d, but %d", ibtpIndexExist, idx+1, ibtp.Index))
-		}
-
-		if ibtp.Index > idx+1 {
-			return fmt.Errorf(fmt.Sprintf("%s: required %d, but %d", ibtpIndexWrong, idx+1, ibtp.Index))
-		}
 	}
 
-	return nil
+	return ordered, nil
 }
 
-func (x *InterchainManager) checkPubKeyAndCaller(pub string) error {
-	pubKeyBytes, err := base64.StdEncoding.DecodeString(pub)
-	if err != nil {
-		return fmt.Errorf("decode public key bytes: %w", err)
-	}
-	pubKey, err := ecdsa.UnmarshalPublicKey(pubKeyBytes, crypto.Secp256k1)
-	if err != nil {
-		return fmt.Errorf("decrypt registerd public key error: %w", err)
-	}
-	addr, err := pubKey.Address()
-	if err != nil {
-		return fmt.Errorf("decrypt registerd public key error: %w", err)
-	}
-	if addr.String() != x.Caller() {
-		return fmt.Errorf("chain pub key derived address != caller")
-	}
-	return nil
-}
+//// getAppchainInfo returns the appchain info by chain ID
+//func (x *InterchainManager) getAppchainInfo(chainID string) (*appchainMgr.Appchain, error) {
+//	appchain := &appchainMgr.Appchain{}
+//	res := x.CrossInvoke(constant.AppchainMgrContractAddr.Address().String(), "GetAppchain", pb.String(chainID))
+//	if !res.Ok {
+//		return nil, fmt.Errorf("chain %s is not registered", chainID)
+//	}
+//	if err := json.Unmarshal(res.Result, appchain); err != nil {
+//		return nil, fmt.Errorf("%s: unmarshal appchain info error: %w", internalError, err)
+//	}
+//	return appchain, nil
+//}
 
-func (x *InterchainManager) checkAppchain(id string) (*pb.Interchain, *appchainMgr.Appchain, error) {
-	interchain, ok := x.getInterchain(id)
-	if !ok {
-		return nil, nil, fmt.Errorf("%s: this appchain does not exist", AppchainNotAvailable)
-	}
+func (x *InterchainManager) ProcessIBTP(ibtp *pb.IBTP, interchain *pb.Interchain, isTargetFail bool) []byte {
+	srcChainService, _ := x.parseChainService(ibtp.From)
+	dstChainService, _ := x.parseChainService(ibtp.To)
 
-	app := &appchainMgr.Appchain{}
-	res := x.CrossInvoke(constant.AppchainMgrContractAddr.String(), "GetAppchain", pb.String(id))
-	if !res.Ok {
-		return nil, nil, fmt.Errorf("%s: get appchain info error: %s", AppchainNotAvailable, string(res.Result))
-	}
-
-	if err := json.Unmarshal(res.Result, app); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal error: " + err.Error())
-	}
-
-	if app.Status != governance.GovernanceAvailable {
-		return nil, nil, fmt.Errorf("%s: the appchain status is %s, can not handle IBTP", AppchainNotAvailable, string(app.Status))
-	}
-
-	return interchain, app, nil
-}
-
-// isRelayIBTP returns whether ibtp.from is relaychain type
-func (x *InterchainManager) getAppchainInfo(chainMethod string) (*appchainMgr.Appchain, error) {
-	srcChain := &appchainMgr.Appchain{}
-	res := x.CrossInvoke(constant.AppchainMgrContractAddr.String(), "GetAppchain", pb.String(chainMethod))
-	if err := json.Unmarshal(res.Result, srcChain); err != nil {
-		return nil, fmt.Errorf("%s: unmarshal appchain info error: %w", internalError, err)
-	}
-	return srcChain, nil
-}
-
-func (x *InterchainManager) ProcessIBTP(ibtp *pb.IBTP, interchain *pb.Interchain) {
-	m := make(map[string]uint64)
-	if pb.IBTP_INTERCHAIN == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_INIT == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REDEEM == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REFUND == ibtp.Type {
+	if pb.IBTP_REQUEST == ibtp.Category() {
 		if interchain.InterchainCounter == nil {
 			x.Logger().Info("interchain counter is nil, make one")
 			interchain.InterchainCounter = make(map[string]uint64)
 		}
 		interchain.InterchainCounter[ibtp.To]++
 		x.setInterchain(ibtp.From, interchain)
-		x.AddObject(x.indexMapKey(ibtp.ID()), x.GetTxHash())
-		m[ibtp.To] = x.GetTxIndex()
+		x.AddObject(IndexMapKey(getIBTPID(ibtp.From, ibtp.To, ibtp.Index)), x.GetTxHash())
+		if dstChainService.ChainId == dstChainService.BxhId {
+			data, _ := ibtp.Marshal()
+			res := x.CrossInvoke(constant.InterBrokerContractAddr.Address().String(), "InvokeInterchain", pb.Bytes(data))
+			return res.Result
+		}
+
+		ic, _ := x.getInterchain(ibtp.To)
+		ic.SourceInterchainCounter[ibtp.From] = ibtp.Index
+		x.setInterchain(ibtp.To, ic)
 	} else {
 		interchain.ReceiptCounter[ibtp.To] = ibtp.Index
 		x.setInterchain(ibtp.From, interchain)
-		m[ibtp.From] = x.GetTxIndex()
+		if srcChainService.ChainId == srcChainService.BxhId {
+			data, _ := ibtp.Marshal()
+			x.CrossInvoke(constant.InterBrokerContractAddr.Address().String(), "InvokeReceipt", pb.Bytes(data))
+		}
 
 		ic, _ := x.getInterchain(ibtp.To)
 		ic.SourceReceiptCounter[ibtp.From] = ibtp.Index
 		x.setInterchain(ibtp.To, ic)
-		x.SetObject(x.indexReceiptMapKey(ibtp.ID()), x.GetTxHash())
+		x.SetObject(IndexReceiptMapKey(getIBTPID(ibtp.From, ibtp.To, ibtp.Index)), x.GetTxHash())
 
+		result := true
+		if ibtp.Type == pb.IBTP_RECEIPT_FAILURE {
+			result = false
+		}
+		x.CrossInvoke(constant.ServiceMgrContractAddr.Address().String(), "RecordInvokeService",
+			pb.String(ibtp.To),
+			pb.String(ibtp.From),
+			pb.Bool(result))
+	}
+
+	if isTargetFail {
+		res := &boltvm.Response{}
+		res.Result = []byte("begin_failure")
+		return res.Result
+	}
+	return nil
+}
+
+func (x *InterchainManager) notifySrcDst(ibtp *pb.IBTP, statusChange *StatusChange) {
+	m := make(map[string]uint64)
+	srcChainService, _ := x.parseChainService(ibtp.From)
+	dstChainService, _ := x.parseChainService(ibtp.To)
+
+	notifySrc, notifyDst := statusChange.NotifyFlags()
+	if notifySrc {
+		if srcChainService.IsLocal {
+			m[srcChainService.ChainId] = x.GetTxIndex()
+			x.addToMultiTxNotifyMap(x.GetCurrentHeight(), statusChange.OtherIBTPIDs, true)
+		} else {
+			m[DEFAULT_UNION_PIER_ID] = x.GetTxIndex()
+		}
+	}
+	if notifyDst {
+		if dstChainService.IsLocal {
+			m[dstChainService.ChainId] = x.GetTxIndex()
+			x.addToMultiTxNotifyMap(x.GetCurrentHeight(), statusChange.OtherIBTPIDs, false)
+		} else {
+			m[DEFAULT_UNION_PIER_ID] = x.GetTxIndex()
+		}
 	}
 
 	x.PostInterchainEvent(m)
 }
 
-func (x *InterchainManager) beginMultiTargetsTransaction(srcChainMethod string, ibtps *pb.IBTPs) *boltvm.Response {
-	args := make([]*pb.Arg, 0)
-	globalId := fmt.Sprintf("%s-%s", srcChainMethod, x.GetTxHash())
-	args = append(args, pb.String(globalId))
-
-	for _, ibtp := range ibtps.Ibtps {
-		if ibtp.Type != pb.IBTP_INTERCHAIN {
-			return boltvm.Error("ibtp type != IBTP_INTERCHAIN")
+func (x *InterchainManager) beginTransaction(ibtp *pb.IBTP, isFailed bool) (*StatusChange, error) {
+	txId := fmt.Sprintf("%s-%s-%d", ibtp.From, ibtp.To, ibtp.Index)
+	bxhID0, _, _ := ibtp.ParseFrom()
+	bxhID1, _, _ := ibtp.ParseTo()
+	timeoutHeight := uint64(ibtp.TimeoutHeight)
+	// TODO: disable transaction management for inter-bitxhub transaction temporarily
+	if bxhID0 != bxhID1 {
+		timeoutHeight = 0
+		if !isFailed {
+			sourceFailed, err := x.checkTxStatusForTargetBxh(ibtp)
+			if err != nil {
+				return nil, err
+			}
+			isFailed = sourceFailed
 		}
-
-		childTxId := fmt.Sprintf("%s-%s-%d", ibtp.From, ibtp.To, ibtp.Index)
-		args = append(args, pb.String(childTxId))
 	}
 
-	return x.CrossInvoke(constant.TransactionMgrContractAddr.String(), "BeginMultiTXs", args...)
+	res := boltvm.Success(nil)
+	if ibtp.Group == nil {
+		res = x.CrossInvoke(constant.TransactionMgrContractAddr.Address().String(), "Begin", pb.String(txId), pb.Uint64(timeoutHeight), pb.Bool(isFailed))
+		if !res.Ok {
+			return nil, fmt.Errorf(string(res.Result))
+		}
+	} else {
+		count := uint64(len(ibtp.Group.Keys) + 1)
+		globalID, err := genGlobalTxID(ibtp)
+		if err != nil {
+			return nil, err
+		}
+		res = x.CrossInvoke(constant.TransactionMgrContractAddr.Address().String(), "BeginMultiTXs", pb.String(globalID), pb.String(ibtp.ID()), pb.Uint64(timeoutHeight), pb.Bool(isFailed), pb.Uint64(count))
+		if !res.Ok {
+			return nil, fmt.Errorf(string(res.Result))
+		}
+	}
+
+	change := StatusChange{}
+	if err := json.Unmarshal(res.Result, &change); err != nil {
+		return nil, err
+	}
+
+	return &change, nil
 }
 
-func (x *InterchainManager) beginTransaction(ibtp *pb.IBTP) *boltvm.Response {
+func (x *InterchainManager) reportTransaction(ibtp *pb.IBTP) (*StatusChange, error) {
 	txId := fmt.Sprintf("%s-%s-%d", ibtp.From, ibtp.To, ibtp.Index)
-	return x.CrossInvoke(constant.TransactionMgrContractAddr.String(), "Begin", pb.String(txId))
-}
-
-func (x *InterchainManager) reportTransaction(ibtp *pb.IBTP) *boltvm.Response {
-	txId := fmt.Sprintf("%s-%s-%d", ibtp.From, ibtp.To, ibtp.Index)
-	result := int32(0)
-	if ibtp.Type == pb.IBTP_RECEIPT_FAILURE {
-		result = 1
-	}
-	return x.CrossInvoke(constant.TransactionMgrContractAddr.String(), "Report", pb.String(txId), pb.Int32(result))
-}
-
-func (x *InterchainManager) handleAssetExchange(ibtp *pb.IBTP) *boltvm.Response {
-	var method string
-
-	switch ibtp.Type {
-	case pb.IBTP_ASSET_EXCHANGE_INIT:
-		method = "Init"
-	case pb.IBTP_ASSET_EXCHANGE_REDEEM:
-		method = "Redeem"
-	case pb.IBTP_ASSET_EXCHANGE_REFUND:
-		method = "Refund"
-	default:
-		return boltvm.Error("unsupported asset exchange type")
+	res := x.CrossInvoke(constant.TransactionMgrContractAddr.Address().String(), "Report", pb.String(txId), pb.Int32(int32(ibtp.Type)))
+	if !res.Ok {
+		return nil, fmt.Errorf(string(res.Result))
 	}
 
-	return x.CrossInvoke(constant.AssetExchangeContractAddr.String(), method, pb.String(ibtp.From),
-		pb.String(ibtp.To), pb.Bytes(ibtp.Extra))
+	change := StatusChange{}
+	if err := json.Unmarshal(res.Result, &change); err != nil {
+		return nil, err
+	}
+
+	return &change, nil
 }
 
-func (x *InterchainManager) GetIBTPByID(id string) *boltvm.Response {
+func (x *InterchainManager) GetIBTPByID(id string, isReq bool) *boltvm.Response {
 	arr := strings.Split(id, "-")
 	if len(arr) != 3 {
-		return boltvm.Error("wrong ibtp id")
-	}
-	srcAppchainMethod := arr[0]
-	dstAppchainMethod := arr[1]
-	if !bitxid.DID(srcAppchainMethod).IsValidFormat() || !bitxid.DID(dstAppchainMethod).IsValidFormat() {
-		return boltvm.Error("invalid format of appchain method")
+		return boltvm.Error(boltvm.InterchainWrongIBTPIDCode, fmt.Sprintf(string(boltvm.InterchainWrongIBTPIDMsg), id))
 	}
 
-	var hash types.Hash
-	exist := x.GetObject(x.indexMapKey(id), &hash)
+	var (
+		hash types.Hash
+		key  string
+	)
+
+	if isReq {
+		key = IndexMapKey(id)
+	} else {
+		key = IndexReceiptMapKey(id)
+	}
+	exist := x.GetObject(key, &hash)
 	if !exist {
-		return boltvm.Error("this ibtp id is not existed")
+		return boltvm.Error(boltvm.InterchainNonexistentIBTPCode, fmt.Sprintf(string(boltvm.InterchainNonexistentIBTPMsg), id))
 	}
 
 	return boltvm.Success(hash.Bytes())
 }
 
-func (x *InterchainManager) handleUnionIBTP(ibtp *pb.IBTP) *boltvm.Response {
-	srcRelayChainID := strings.Split(ibtp.From, "-")[0]
+func genGlobalTxID(ibtp *pb.IBTP) (string, error) {
+	m := make(map[string]uint64)
 
-	_, app, err := x.checkAppchain(srcRelayChainID)
+	m[ibtp.To] = ibtp.Index
+	for i, key := range ibtp.Group.Keys {
+		m[key] = ibtp.Group.Vals[i]
+	}
+
+	data, err := json.Marshal(m)
 	if err != nil {
-		return boltvm.Error(err.Error())
+		return "", err
 	}
 
-	if ibtp.To == "" {
-		return boltvm.Error("empty destination chain id")
-	}
-	if ok := x.Has(AppchainKey(ibtp.To)); !ok {
-		return boltvm.Error(fmt.Sprintf("target appchain does not exist: %s", ibtp.To))
-	}
+	hash := sha256.Sum256(append([]byte(ibtp.From), data...))
 
-	interchain, ok := x.getInterchain(ibtp.From)
-	if !ok {
-		interchain = &pb.Interchain{
-			ID: ibtp.From,
-		}
-		x.setInterchain(ibtp.From, interchain)
-	}
-
-	if err := x.checkUnionIBTP(app, ibtp, interchain); err != nil {
-		return boltvm.Error(err.Error())
-	}
-
-	x.ProcessIBTP(ibtp, interchain)
-	return boltvm.Success(nil)
+	return types.NewHash(hash[:]).String(), nil
 }
 
-func (x *InterchainManager) checkUnionIBTP(app *appchainMgr.Appchain, ibtp *pb.IBTP, interchain *pb.Interchain) error {
-	if pb.IBTP_INTERCHAIN == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_INIT == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REDEEM == ibtp.Type ||
-		pb.IBTP_ASSET_EXCHANGE_REFUND == ibtp.Type {
-
-		idx := interchain.InterchainCounter[ibtp.To]
-		if idx+1 != ibtp.Index {
-			return fmt.Errorf(fmt.Sprintf("wrong index, required %d, but %d", idx+1, ibtp.Index))
-		}
-	} else {
-		idx := interchain.ReceiptCounter[ibtp.To]
-		if idx+1 != ibtp.Index {
-			if interchain.SourceReceiptCounter[ibtp.To]+1 != ibtp.Index {
-				return fmt.Errorf("wrong receipt index, required %d, but %d", idx+1, ibtp.Index)
-			}
-		}
-	}
-
-	_, err := verifyMultiSign(app, ibtp, ibtp.Proof)
-	return err
-}
-
-// verifyMultiSign .
-func verifyMultiSign(app *appchainMgr.Appchain, ibtp *pb.IBTP, proof []byte) (bool, error) {
-	if "" == app.Validators {
-		return false, fmt.Errorf("empty validators in relay chain:%s", app.ID)
-	}
-	var validators BxhValidators
-	if err := json.Unmarshal([]byte(app.Validators), &validators); err != nil {
-		return false, err
-	}
-
-	m := make(map[string]struct{}, 0)
-	for _, validator := range validators.Addresses {
-		m[validator] = struct{}{}
-	}
-
-	var signs pb.SignResponse
-	if err := signs.Unmarshal(ibtp.Proof); err != nil {
-		return false, err
-	}
-
-	threshold := (len(validators.Addresses) - 1) / 3 // TODO be dynamic
-	counter := 0
-
-	ibtpHash := ibtp.Hash()
-	hash := sha256.Sum256([]byte(ibtpHash.String()))
-	for v, sign := range signs.Sign {
-		if _, ok := m[v]; !ok {
-			return false, fmt.Errorf("wrong validator: %s", v)
-		}
-		delete(m, v)
-		addr := types.NewAddressByStr(v)
-		ok, _ := asym.Verify(crypto.Secp256k1, sign, hash[:], *addr)
-		if ok {
-			counter++
-		}
-		if counter > threshold {
-			return true, nil
-		}
-	}
-	return false, fmt.Errorf("multi signs verify fail, counter: %d", counter)
-}
-
-func AppchainKey(id string) string {
-	return appchainMgr.PREFIX + id
-}
-
-func (x *InterchainManager) indexMapKey(id string) string {
+func IndexMapKey(id string) string {
 	return fmt.Sprintf("index-tx-%s", id)
 }
 
-func (x *InterchainManager) indexReceiptMapKey(id string) string {
+func IndexReceiptMapKey(id string) string {
 	return fmt.Sprintf("index-receipt-tx-%s", id)
+}
+
+func (x *InterchainManager) parseChainService(id string) (*ChainService, error) {
+	splits := strings.Split(id, ":")
+
+	if len(splits) != 3 {
+		return nil, fmt.Errorf("invalid chain service id %s", id)
+	}
+
+	bxhId, err := x.getBitXHubID()
+	if err != nil {
+		return nil, err
+	}
+
+	return &ChainService{
+		BxhId:     splits[0],
+		ChainId:   splits[1],
+		ServiceId: splits[2],
+		IsLocal:   splits[0] == bxhId,
+	}, nil
+}
+
+func (x *InterchainManager) GetBitXHubID() *boltvm.Response {
+	id, err := x.getBitXHubID()
+	if err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), err.Error()))
+	} else {
+		return boltvm.Success([]byte(id))
+	}
+}
+
+func (x *InterchainManager) getBitXHubID() (string, error) {
+	ok, val := x.Get(BitXHubID)
+	if !ok {
+		return "", fmt.Errorf("cannot get bitxhub ID")
+	}
+
+	return string(val), nil
+}
+
+func (x *InterchainManager) getServiceByID(id string) (*service_mgr.Service, error) {
+	service := &service_mgr.Service{}
+
+	res := x.CrossInvoke(constant.ServiceMgrContractAddr.Address().String(), "GetServiceInfo", pb.String(id))
+	if !res.Ok {
+		return nil, fmt.Errorf("can not get service %s info: %s", id, string(res.Result))
+	}
+
+	if err := json.Unmarshal(res.Result, service); err != nil {
+		return nil, fmt.Errorf("unmarshal service of ID %s: %w", id, err)
+	}
+
+	return service, nil
+}
+
+//func (x *InterchainManager) checkAppchainAvailability(id string) error {
+//	res := x.CrossInvoke(constant.AppchainMgrContractAddr.Address().String(), "IsAvailable", pb.String(id))
+//	if !res.Ok || string(res.Result) == FALSE {
+//		return fmt.Errorf("appchain %s is not available", id)
+//	}
+//
+//	return nil
+//}
+
+func (x *InterchainManager) checkBitXHubAvailability(id string) error {
+	res := x.CrossInvoke(constant.AppchainMgrContractAddr.Address().String(), "IsAvailableBitxhub", pb.String(id))
+	if !res.Ok || string(res.Result) == FALSE {
+		return fmt.Errorf("chain %s is not available bitxhub", id)
+	}
+
+	return nil
+}
+
+func (x *InterchainManager) checkServiceAvailability(chainServiceID string) error {
+	res := x.CrossInvoke(constant.ServiceMgrContractAddr.Address().String(), "IsAvailable", pb.String(chainServiceID))
+	if !res.Ok || string(res.Result) == FALSE {
+		return fmt.Errorf("service %s is not available", chainServiceID)
+	}
+
+	return nil
+}
+
+//func (x *InterchainManager) checkServiceIndex(ibtp *pb.IBTP, counter map[string]uint64, dstChainService *ChainService) *boltvm.BxhError {
+//	if dstChainService.IsLocal {
+//		dstService, _ := x.getServiceByID(dstChainService.getChainServiceId())
+//		if dstService == nil || dstService.Ordered {
+//			if err := checkIndex(counter[dstChainService.getFullServiceId()]+1, ibtp.Index); err != nil {
+//				return err
+//			}
+//		}
+//	} else {
+//		if err := checkIndex(counter[dstChainService.getFullServiceId()]+1, ibtp.Index); err != nil {
+//			return err
+//		}
+//	}
+//
+//	return nil
+//}
+
+func checkIndex(exp, cur uint64) *boltvm.BxhError {
+	if cur < exp {
+		return boltvm.BError(boltvm.InterchainIbtpIndexExistCode, fmt.Sprintf(string(boltvm.InterchainIbtpIndexExistMsg), exp, cur))
+	}
+	if cur > exp {
+		return boltvm.BError(boltvm.InterchainIbtpIndexWrongCode, fmt.Sprintf(string(boltvm.InterchainIbtpIndexWrongMsg), exp, cur))
+	}
+
+	return nil
+}
+
+func (x *InterchainManager) addToMultiTxNotifyMap(height uint64, ibtpIDs []string, toSrc bool) {
+	if len(ibtpIDs) == 0 {
+		return
+	}
+
+	var multiTxNotifyMap map[string][]string
+	ok := x.GetObject(MultiTxNotifyKey(height), &multiTxNotifyMap)
+	if !ok {
+		multiTxNotifyMap = make(map[string][]string)
+	}
+
+	if toSrc {
+		from, _, _, _ := pb.ParseIBTPID(ibtpIDs[0])
+		_, chainID, _, _ := pb.ParseFullServiceID(from)
+		multiTxNotifyMap[chainID] = append(multiTxNotifyMap[chainID], ibtpIDs...)
+	} else {
+		for _, ibtpID := range ibtpIDs {
+			_, to, _, _ := pb.ParseIBTPID(ibtpIDs[0])
+			_, chainID, _, _ := pb.ParseFullServiceID(to)
+			multiTxNotifyMap[chainID] = append(multiTxNotifyMap[chainID], ibtpID)
+		}
+	}
+
+	x.SetObject(MultiTxNotifyKey(height), multiTxNotifyMap)
+}
+
+func serviceKey(id string) string {
+	return fmt.Sprintf("%s-%s", INTERCHAINSERVICE_PREFIX, id)
+}
+
+func (x *InterchainManager) GetAllServiceIDs() *boltvm.Response {
+	ret := make([]string, 0)
+	ok, value := x.Query(INTERCHAINSERVICE_PREFIX)
+	if !ok {
+		return boltvm.Success(nil)
+	}
+	for _, data := range value {
+		interchain := &pb.Interchain{}
+		if err := interchain.Unmarshal(data); err != nil {
+			return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), err.Error()))
+		}
+		ret = append(ret, interchain.ID)
+	}
+
+	if result, err := json.Marshal(ret); err != nil {
+		return boltvm.Error(boltvm.InterchainInternalErrCode, fmt.Sprintf(string(boltvm.InterchainInternalErrMsg), err.Error()))
+	} else {
+		return boltvm.Success(result)
+	}
+}
+
+func (x *InterchainManager) checkTxStatusForTargetBxh(ibtp *pb.IBTP) (bool, error) {
+	targetBxhID, _, _ := ibtp.ParseTo()
+	curBxhID, err := x.getBitXHubID()
+	if err != nil {
+		return false, err
+	}
+
+	if targetBxhID == curBxhID {
+		proof := ibtp.GetExtra()
+		if len(proof) == 0 {
+			return false, fmt.Errorf("get empty proof from source bitxhub for IBTP %s", ibtp.ID())
+		}
+
+		bxhProof := &pb.BxhProof{}
+		if err := bxhProof.Unmarshal(proof); err != nil {
+			return false, err
+		}
+		if bxhProof.TxStatus == pb.TransactionStatus_BEGIN_ROLLBACK || bxhProof.TxStatus == pb.TransactionStatus_BEGIN_FAILURE {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func getIBTPID(from, to string, index uint64) string {
+	return fmt.Sprintf("%s-%s-%d", from, to, index)
+}
+
+func MultiTxNotifyKey(height uint64) string {
+	return fmt.Sprintf("%s-%d", MULTITX_PREFIX, height)
+}
+
+func (x *InterchainManager) postAuditInterchainEvent(fullServiceID string) error {
+	ok, interchainData := x.Get(serviceKey(fullServiceID))
+	if !ok {
+		return fmt.Errorf("not found interchain %s", fullServiceID)
+	}
+
+	chainService, err := x.parseChainService(fullServiceID)
+	if err != nil {
+		return err
+	}
+	auditInfo := &pb.AuditRelatedObjInfo{
+		AuditObj: interchainData,
+		RelatedChainIDList: map[string][]byte{
+			chainService.ChainId: {},
+		},
+		RelatedNodeIDList: map[string][]byte{},
+	}
+	x.PostEvent(pb.Event_AUDIT_INTERCHAIN, auditInfo)
+
+	return nil
 }

@@ -9,7 +9,6 @@ datastore
 node_modules
 dump
 pkg/order/build
-internal/plugins/build
 scripts/build
 build_solo
 build*.tar.gz
@@ -20,13 +19,14 @@ scripts/prepare
 logs
 mock_*/
 !mock_peermgr
+!mock_ledger
 .fabric-samples
 coverage.txt
 docs/.vuepress/dist
 testdata/storage
+internal/plugins/build
 
 imports/imports.go
 goent.mod
 goent.sum
 dist
-build

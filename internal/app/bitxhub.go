@@ -3,29 +3,39 @@ package app
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"math/big"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/common-nighthawk/go-figure"
 	"github.com/ethereum/go-ethereum/common/fdlimit"
+	"github.com/meshplus/bitxhub-core/agency"
+	"github.com/meshplus/bitxhub-core/order"
+	"github.com/meshplus/bitxhub-kit/crypto/asym"
+	"github.com/meshplus/bitxhub-kit/storage"
 	"github.com/meshplus/bitxhub-kit/storage/blockfile"
-	"github.com/meshplus/bitxhub-kit/storage/leveldb"
+	"github.com/meshplus/bitxhub/api/gateway"
+	"github.com/meshplus/bitxhub/api/grpc"
+	"github.com/meshplus/bitxhub/api/jsonrpc"
 	_ "github.com/meshplus/bitxhub/imports"
 	"github.com/meshplus/bitxhub/internal/executor"
+	"github.com/meshplus/bitxhub/internal/executor/oracle/appchain"
 	"github.com/meshplus/bitxhub/internal/ledger"
 	"github.com/meshplus/bitxhub/internal/ledger/genesis"
 	"github.com/meshplus/bitxhub/internal/loggers"
-	orderplg "github.com/meshplus/bitxhub/internal/plugins"
+	"github.com/meshplus/bitxhub/internal/profile"
 	"github.com/meshplus/bitxhub/internal/repo"
 	"github.com/meshplus/bitxhub/internal/router"
 	"github.com/meshplus/bitxhub/internal/storages"
-	"github.com/meshplus/bitxhub/pkg/order"
 	"github.com/meshplus/bitxhub/pkg/peermgr"
+	ledger2 "github.com/meshplus/eth-kit/ledger"
 	"github.com/sirupsen/logrus"
 )
 
 type BitXHub struct {
-	Ledger        ledger.Ledger
+	Ledger        *ledger.Ledger
 	BlockExecutor executor.Executor
 	ViewExecutor  executor.Executor
 	Router        router.Router
@@ -35,26 +45,53 @@ type BitXHub struct {
 	repo   *repo.Repo
 	logger logrus.FieldLogger
 
+	Monitor       *profile.Monitor
+	Pprof         *profile.Pprof
+	LoggerWrapper *loggers.LoggerWrapper
+	Gateway       *gateway.Gateway
+	Grpc          *grpc.ChainBrokerService
+	Jsonrpc       *jsonrpc.ChainBrokerService
+
 	Ctx    context.Context
 	Cancel context.CancelFunc
 }
 
-func NewBitXHub(rep *repo.Repo) (*BitXHub, error) {
+func NewBitXHub(rep *repo.Repo, orderPath string) (*BitXHub, error) {
 	repoRoot := rep.Config.RepoRoot
+	var orderRoot string
+	if len(orderPath) == 0 {
+		orderRoot = repoRoot
+	} else {
+		orderRoot = filepath.Dir(orderPath)
+		fileData, err := ioutil.ReadFile(orderPath)
+		if err != nil {
+			return nil, fmt.Errorf("read order config error: %w", err)
+		}
+		err = ioutil.WriteFile(filepath.Join(repoRoot, "order.toml"), fileData, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("write order.toml failed: %w", err)
+		}
+	}
 
 	bxh, err := GenerateBitXHubWithoutOrder(rep)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate bitxhub without order failed: %w", err)
 	}
 
 	chainMeta := bxh.Ledger.GetChainMeta()
 
 	m := rep.NetworkConfig.GetVpInfos()
 
-	order, err := orderplg.New(
-		order.WithRepoRoot(repoRoot),
+	//Get the order constructor according to different order type.
+	orderCon, err := agency.GetOrderConstructor(rep.Config.Order.Type)
+	if err != nil {
+		return nil, fmt.Errorf("get order %s failed: %w", rep.Config.Order.Type, err)
+	}
+
+	order, err := orderCon(
+		order.WithRepoRoot(orderRoot),
 		order.WithStoragePath(repo.GetStoragePath(repoRoot, "order")),
-		order.WithPluginPath(rep.Config.Plugin),
+		order.WithOrderType(rep.Config.Order.Type),
 		order.WithNodes(m),
 		order.WithID(rep.NetworkConfig.ID),
 		order.WithIsNew(rep.NetworkConfig.New),
@@ -64,10 +101,10 @@ func NewBitXHub(rep *repo.Repo) (*BitXHub, error) {
 		order.WithDigest(chainMeta.BlockHash.String()),
 		order.WithGetChainMetaFunc(bxh.Ledger.GetChainMeta),
 		order.WithGetBlockByHeightFunc(bxh.Ledger.GetBlock),
-		order.WithGetAccountNonceFunc(bxh.Ledger.GetNonce),
+		order.WithGetAccountNonceFunc(bxh.Ledger.Copy().GetNonce),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("initialize order failed: %w", err)
 	}
 
 	r, err := router.New(loggers.Logger(loggers.Router), rep, bxh.Ledger, bxh.PeerMgr, order.Quorum())
@@ -89,6 +126,19 @@ func GenerateBitXHubWithoutOrder(rep *repo.Repo) (*BitXHub, error) {
 	repoRoot := rep.Config.RepoRoot
 	logger := loggers.Logger(loggers.App)
 
+	err := asym.ConfiguredKeyType(rep.Config.Crypto.Algorithms)
+	if err != nil {
+		return nil, fmt.Errorf("set configured key type failed: %w", err)
+	}
+
+	supportCryptoTypeToName := asym.GetConfiguredKeyType()
+	printType := "Supported crypto type:"
+	for _, name := range supportCryptoTypeToName {
+		printType = fmt.Sprintf("%s%s ", printType, name)
+	}
+	printType = fmt.Sprintf("%s\n", printType)
+	fmt.Println(printType)
+
 	if err := storages.Initialize(repoRoot); err != nil {
 		return nil, fmt.Errorf("storages initialize: %w", err)
 	}
@@ -98,7 +148,7 @@ func GenerateBitXHubWithoutOrder(rep *repo.Repo) (*BitXHub, error) {
 		return nil, fmt.Errorf("create blockchain storage: %w", err)
 	}
 
-	ldb, err := leveldb.New(repo.GetStoragePath(repoRoot, "ledger"))
+	stateStorage, err := ledger.OpenStateDB(repo.GetStoragePath(repoRoot, "ledger"), rep.Config.Ledger.Type)
 	if err != nil {
 		return nil, fmt.Errorf("create tm-leveldb: %w", err)
 	}
@@ -108,34 +158,51 @@ func GenerateBitXHubWithoutOrder(rep *repo.Repo) (*BitXHub, error) {
 		return nil, fmt.Errorf("blockfile initialize: %w", err)
 	}
 
+	appchainClient := &appchain.Client{}
+	if rep.Config.Appchain.Enable {
+		appchainClient, err = appchain.NewAppchainClient(filepath.Join(repoRoot, rep.Config.Appchain.EthHeaderPath), repo.GetStoragePath(repoRoot, "appchain_client"), loggers.Logger(loggers.Executor))
+		if err != nil {
+			return nil, fmt.Errorf("initialize appchain client failed: %w", err)
+		}
+	}
+
 	// 0. load ledger
-	rwLdg, err := ledger.New(rep, bcStorage, ldb, bf, nil, loggers.Logger(loggers.Executor))
+	rwLdg, err := ledger.New(rep, bcStorage, stateStorage, bf, nil, loggers.Logger(loggers.Executor))
 	if err != nil {
 		return nil, fmt.Errorf("create RW ledger: %w", err)
 	}
 
-	if rwLdg.GetChainMeta().Height == 0 {
-		if err := genesis.Initialize(&rep.Config.Genesis, rwLdg); err != nil {
-			return nil, err
-		}
-		logger.Info("Initialize genesis")
+	viewLdg := &ledger.Ledger{
+		ChainLedger: rwLdg.ChainLedger,
 	}
-
-	// create read only ledger
-	viewLdg, err := ledger.New(rep, bcStorage, ldb, bf, rwLdg.AccountCache(), loggers.Logger(loggers.Executor))
-	if err != nil {
-		return nil, fmt.Errorf("create readonly ledger: %w", err)
+	if rep.Config.Ledger.Type == "simple" {
+		// create read only ledger
+		viewLdg.StateLedger, err = ledger.NewSimpleLedger(rep, stateStorage.(storage.Storage), nil, loggers.Logger(loggers.Executor))
+		if err != nil {
+			return nil, fmt.Errorf("create readonly ledger: %w", err)
+		}
+	} else {
+		viewLdg.StateLedger = rwLdg.StateLedger.(*ledger2.ComplexStateLedger).Copy()
 	}
 
 	// 1. create executor and view executor
-	txExec, err := executor.New(rwLdg, loggers.Logger(loggers.Executor), rep.Config.Executor.Type, rep.Config.GasLimit)
-	if err != nil {
-		return nil, fmt.Errorf("create BlockExecutor: %w", err)
-	}
-
-	viewExec, err := executor.New(viewLdg, loggers.Logger(loggers.Executor), rep.Config.Executor.Type, rep.Config.GasLimit)
+	viewExec, err := executor.New(viewLdg, loggers.Logger(loggers.Executor), appchainClient, rep.Config, big.NewInt(0))
 	if err != nil {
 		return nil, fmt.Errorf("create ViewExecutor: %w", err)
+	}
+
+	if rwLdg.ChainLedger.GetChainMeta().Height == 0 {
+		if err := genesis.Initialize(&rep.Config.Genesis, rep.NetworkConfig.Nodes, rep.NetworkConfig.N, rwLdg, viewExec); err != nil {
+			return nil, err
+		}
+		logger.WithFields(logrus.Fields{
+			"genesis block hash": rwLdg.ChainLedger.GetChainMeta().BlockHash,
+		}).Info("Initialize genesis")
+	}
+
+	txExec, err := executor.New(rwLdg, loggers.Logger(loggers.Executor), appchainClient, rep.Config, big.NewInt(int64(rep.Config.Genesis.BvmGasPrice)))
+	if err != nil {
+		return nil, fmt.Errorf("create BlockExecutor: %w", err)
 	}
 
 	peerMgr, err := peermgr.New(rep, loggers.Logger(loggers.P2P), rwLdg)
@@ -216,13 +283,50 @@ func (bxh *BitXHub) Stop() error {
 	return nil
 }
 
+func (bxh *BitXHub) ReConfig(repo *repo.Repo) {
+	if repo.Config != nil {
+		config := repo.Config
+		loggers.ReConfig(config)
+
+		if err := bxh.Jsonrpc.ReConfig(config); err != nil {
+			bxh.logger.Errorf("reconfig json rpc failed: %v", err)
+		}
+
+		if err := bxh.Grpc.ReConfig(config); err != nil {
+			bxh.logger.Errorf("reconfig grpc failed: %v", err)
+		}
+
+		if err := bxh.Gateway.ReConfig(config); err != nil {
+			bxh.logger.Errorf("reconfig gateway failed: %v", err)
+		}
+
+		if err := bxh.PeerMgr.ReConfig(config); err != nil {
+			bxh.logger.Errorf("reconfig PeerMgr failed: %v", err)
+		}
+
+		if err := bxh.Monitor.ReConfig(config); err != nil {
+			bxh.logger.Errorf("reconfig Monitor failed: %v", err)
+		}
+
+		if err := bxh.Pprof.ReConfig(config); err != nil {
+			bxh.logger.Errorf("reconfig Pprof failed: %v", err)
+		}
+	}
+	if repo.NetworkConfig != nil {
+		config := repo.NetworkConfig
+		if err := bxh.PeerMgr.ReConfig(config); err != nil {
+			bxh.logger.Errorf("reconfig PeerMgr failed: %v", err)
+		}
+	}
+}
+
 func (bxh *BitXHub) printLogo() {
 	for {
 		time.Sleep(100 * time.Millisecond)
 		err := bxh.Order.Ready()
 		if err == nil {
 			bxh.logger.WithFields(logrus.Fields{
-				"plugin_path": bxh.repo.Config.Order.Plugin,
+				"order_type": bxh.repo.Config.Order.Type,
 			}).Info("Order is ready")
 			fmt.Println()
 			fmt.Println("=======================================================")
@@ -239,12 +343,12 @@ func (bxh *BitXHub) printLogo() {
 func (bxh *BitXHub) raiseUlimit(limitNew uint64) error {
 	_, err := fdlimit.Raise(limitNew)
 	if err != nil {
-		return err
+		return fmt.Errorf("set limit failed: %w", err)
 	}
 
 	var limit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit); err != nil {
-		return err
+		return fmt.Errorf("getrlimit error: %w", err)
 	}
 
 	if limit.Cur != limitNew && limit.Cur != limit.Max {

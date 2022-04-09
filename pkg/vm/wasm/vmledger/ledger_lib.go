@@ -1,21 +1,20 @@
 package vmledger
 
 import (
-	"github.com/wasmerio/go-ext-wasm/wasmer"
+	"github.com/bytecodealliance/wasmtime-go"
+	"github.com/meshplus/bitxhub-core/wasm/wasmlib"
 )
 
-type Imports struct {
-	imports *wasmer.Imports
-}
+const (
+	ACCOUNT        = "account"
+	LEDGER         = "ledger"
+	ALLOC_MEM      = "allocate"
+	TX_HASH        = "tx_hash"
+	CURRENT_HEIGHT = "current_height"
+	CALLER         = "caller"
+	CURRENT_CALLER = "current_caller"
+)
 
-func New() (*wasmer.Imports, error) {
-	imports := &Imports{
-		imports: wasmer.NewImports(),
-	}
-	err := imports.importLedger()
-	if err != nil {
-		return nil, err
-	}
-
-	return imports.imports, nil
+func NewLedgerWasmLibs(context map[string]interface{}, store *wasmtime.Store) []*wasmlib.ImportLib {
+	return ImportLedgerLib(context, store)
 }

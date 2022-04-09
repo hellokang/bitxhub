@@ -10,27 +10,37 @@ BitXHub is committed to building a scalable, robust, and pluggable inter-blockch
 reference implementation, that can provide reliable technical support for the formation
 of a blockchain internet and intercommunication of value islands.
 
+**For more details please visit our [documentation](https://docs.bitxhub.cn/) and [whitepaper](https://upload.hyperchain.cn/BitXHub%20Whitepaper.pdf) | [白皮书](https://upload.hyperchain.cn/BitXHub%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf).**
 
-## Quick start
+## Start
 
-See [Quick start](https://github.com/meshplus/bitxhub/wiki/Quick-start) in the wiki.
+BitXHub start script relies on [golang](https://golang.org/) and [tmux](https://github.com/tmux/tmux/wiki). Please
+install the software before start.
 
+Use commands below to clone the project:
 
-## Architecture
+```shell
+git clone git@github.com:meshplus/bitxhub.git
+```
 
-<p>
-    <img src="https://raw.githubusercontent.com/meshplus/bitxhub/master/docs/arch.png" />
-</p>
+BitXHub also relies on some small tools, use commands below to install:
 
-The diagram above shows the overall architecture and basic interchain processing workflow of BitXHub. BitXHub consists of relay-chain, Pier (interchain gateway) and app-chain, which is a service platform to handle the interaction among cross-layer heterogeneous chains.
+```shell
+cd bitxhub
+bash scripts/prepare.sh 
+```
 
-For more details please visit our [whitepaper](https://upload.hyperchain.cn/BitXHub%20Whitepaper.pdf) | [白皮书](https://upload.hyperchain.cn/BitXHub%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf).
+Finally, run the following commands to start a four nodes relay-chain.
 
+```shell
+make cluster
+```
 
+**Noting:** `make cluster` will use `tmux` to split the screen. Thus, during commands processing, better not switch the terminal.
 
-## Usage
+## Playground
+Simply go to [BitXHub Document](https://meshplus.github.io/bitxhub/bitxhub/quick_start/) and follow the tutorials.
 
-Usage guide can be found in [wiki](https://github.com/meshplus/bitxhub/wiki).
 
 ## Contributing
 

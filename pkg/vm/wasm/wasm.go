@@ -6,13 +6,17 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"sync"
 
+	"github.com/bytecodealliance/wasmtime-go"
 	"github.com/meshplus/bitxhub-core/wasm"
+	"github.com/meshplus/bitxhub-core/wasm/wasmlib"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub/pkg/vm"
-	"github.com/wasmerio/go-ext-wasm/wasmer"
+	"github.com/meshplus/bitxhub/pkg/vm/wasm/vmledger"
+	"github.com/sirupsen/logrus"
 )
+
+const GasXVMDeploy = 21000 * 10
 
 var (
 	errorLackOfMethod = fmt.Errorf("wasm execute: lack of method name")
@@ -38,8 +42,12 @@ type Contract struct {
 	Hash types.Hash
 }
 
+func NewStore() *wasmtime.Store {
+	return wasm.NewStore()
+}
+
 // New creates a wasm vm instance
-func New(ctx *vm.Context, imports *wasmer.Imports, instances map[string]wasmer.Instance) (*WasmVM, error) {
+func New(ctx *vm.Context, libs []*wasmlib.ImportLib, context map[string]interface{}, store *wasmtime.Store) (*WasmVM, error) {
 	wasmVM := &WasmVM{
 		ctx: ctx,
 	}
@@ -49,45 +57,50 @@ func New(ctx *vm.Context, imports *wasmer.Imports, instances map[string]wasmer.I
 	}
 
 	contractByte := ctx.Ledger.GetCode(ctx.Callee)
-
-	syncInstances := sync.Map{}
-	for k, instance := range instances {
-		syncInstances.Store(k, instance)
+	if contractByte == nil {
+		return nil, fmt.Errorf("this rule address %s does not exist", ctx.Callee)
 	}
-
-	w, err := wasm.New(contractByte, imports, &syncInstances)
+	contract := &wasm.Contract{}
+	if err := json.Unmarshal(contractByte, contract); err != nil {
+		return nil, fmt.Errorf("contract byte not correct")
+	}
+	w, err := wasm.NewWithStore(contract.Code, context, libs, store)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("init wasm failed: %w", err)
 	}
 
-	w.SetContext(wasm.ACCOUNT, ctx.Ledger.GetOrCreateAccount(ctx.Callee))
-
-	_, ok := w.Instance.Exports["allocate"]
-	if !ok {
-		return nil, fmt.Errorf("no allocate method")
-	}
-	w.SetContext(wasm.ALLOC_MEM, w.Instance.Exports["allocate"])
+	w.SetContext(vmledger.LEDGER, ctx.Ledger)
+	w.SetContext(vmledger.ACCOUNT, ctx.Ledger.GetOrCreateAccount(ctx.Callee))
+	w.SetContext(vmledger.CURRENT_HEIGHT, ctx.CurrentHeight)
+	w.SetContext(vmledger.TX_HASH, ctx.Tx.GetHash().String())
+	w.SetContext(vmledger.CALLER, ctx.Caller.String())
+	w.SetContext(vmledger.CURRENT_CALLER, ctx.CurrentCaller.String())
 	wasmVM.w = w
 
 	return wasmVM, nil
 }
 
-func EmptyImports() (*wasmer.Imports, error) {
-	return wasmer.NewImports(), nil
-}
-
 // Run let the wasm vm excute or deploy the smart contract which depends on whether the callee is empty
-func (w *WasmVM) Run(input []byte) (ret []byte, err error) {
+func (w *WasmVM) Run(input []byte, gasLimit uint64) (ret []byte, gasUsed uint64, err error) {
 	if w.ctx.Callee == nil || bytes.Equal(w.ctx.Callee.Bytes(), (&types.Address{}).Bytes()) {
 		return w.deploy()
 	}
 
-	return w.w.Execute(input)
+	return w.w.Execute(input, gasLimit)
 }
 
-func (w *WasmVM) deploy() ([]byte, error) {
+func (w *WasmVM) deploy() ([]byte, uint64, error) {
+	w.ctx.Logger.WithFields(logrus.Fields{}).Info("Rule is deploying")
 	if len(w.ctx.TransactionData.Payload) == 0 {
-		return nil, fmt.Errorf("contract cannot be empty")
+		return nil, 0, fmt.Errorf("contract cannot be empty")
+	}
+	context := make(map[string]interface{})
+	store := wasm.NewStore()
+	libs := vmledger.NewLedgerWasmLibs(context, store)
+	_, err := wasm.NewWithStore(w.ctx.TransactionData.Payload, context, libs, store)
+	if err != nil {
+		w.ctx.Logger.WithFields(logrus.Fields{}).Error("new instance:", err)
+		return nil, 0, err
 	}
 	contractNonce := w.ctx.Ledger.GetNonce(w.ctx.Caller)
 
@@ -98,13 +111,13 @@ func (w *WasmVM) deploy() ([]byte, error) {
 	}
 	wasmByte, err := json.Marshal(wasmStruct)
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("marshal wasm struct error: %w", err)
 	}
 	w.ctx.Ledger.SetCode(contractAddr, wasmByte)
 
 	w.ctx.Ledger.SetNonce(w.ctx.Caller, contractNonce+1)
 
-	return contractAddr.Bytes(), nil
+	return contractAddr.Bytes(), GasXVMDeploy, nil
 }
 
 func createAddress(b *types.Address, nonce uint64) *types.Address {

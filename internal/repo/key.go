@@ -1,13 +1,14 @@
 package repo
 
 import (
+	"fmt"
 	"io/ioutil"
 	"path/filepath"
+	"strings"
 
 	"github.com/libp2p/go-libp2p-core/crypto"
 	crypto2 "github.com/meshplus/bitxhub-kit/crypto"
 	"github.com/meshplus/bitxhub-kit/crypto/asym"
-	"github.com/meshplus/bitxhub-kit/fileutil"
 	libp2pcert "github.com/meshplus/go-libp2p-cert"
 )
 
@@ -20,12 +21,12 @@ type Key struct {
 func LoadKey(path string) (*Key, error) {
 	privKey, err := asym.RestorePrivateKey(path, "bitxhub")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("restore private key failed: %w", err)
 	}
 
 	address, err := privKey.PublicKey().Address()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get address from public key failed: %w", err)
 	}
 
 	return &Key{
@@ -34,48 +35,34 @@ func LoadKey(path string) (*Key, error) {
 	}, nil
 }
 
-func loadPrivKey(repoRoot string) (*Key, error) {
-	keyData, err := ioutil.ReadFile(filepath.Join(repoRoot, "certs/key.priv"))
-	if err != nil {
-		return nil, err
+func loadPrivKey(repoRoot string, passwd string) (*Key, error) {
+	if strings.TrimSpace(passwd) == "" {
+		passwd = DefaultPasswd
 	}
 
-	privKey, err := libp2pcert.ParsePrivateKey(keyData, crypto2.Secp256k1)
+	privKey, err := asym.RestorePrivateKey(filepath.Join(repoRoot, KeyName), passwd)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("restore private key failed: %w", err)
 	}
 
 	address, err := privKey.PublicKey().Address()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get address from public key failed: %w", err)
 	}
 
 	nodeKeyData, err := ioutil.ReadFile(filepath.Join(repoRoot, "certs/node.priv"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s error: %w", filepath.Join(repoRoot, "certs/node.priv"), err)
 	}
 
 	nodePrivKey, err := libp2pcert.ParsePrivateKey(nodeKeyData, crypto2.ECDSA_P256)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse private key failed: %w", err)
 	}
 
 	libp2pPrivKey, _, err := crypto.ECDSAKeyPairFromKey(nodePrivKey.K)
 	if err != nil {
-		return nil, err
-	}
-
-	keyPath := filepath.Join(repoRoot, KeyName)
-
-	if !fileutil.Exist(keyPath) {
-		privKey, err := asym.PrivateKeyFromStdKey(privKey.K)
-		if err != nil {
-			return nil, err
-		}
-
-		if err := asym.StorePrivateKey(privKey, keyPath, "bitxhub"); err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("generate ecdsa key failed: %w", err)
 	}
 
 	return &Key{

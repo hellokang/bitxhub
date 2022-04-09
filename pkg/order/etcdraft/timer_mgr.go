@@ -28,8 +28,8 @@ func (timer *BatchTimer) IsBatchTimerActive() bool {
 	return !timer.isActive.IsEmpty()
 }
 
-// TODO (YH): add restartTimer???
 // StartBatchTimer starts the batch timer and reset the batchTimerActive to true.
+// TODO (YH): add restartTimer???
 func (timer *BatchTimer) StartBatchTimer() {
 	// stop old timer
 	timer.StopBatchTimer()

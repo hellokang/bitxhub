@@ -5,69 +5,70 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	etherTypes "github.com/ethereum/go-ethereum/core/types"
-	vm "github.com/meshplus/bitxhub-kit/evm"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/pb"
+	ledger2 "github.com/meshplus/eth-kit/ledger"
+	types2 "github.com/meshplus/eth-kit/types"
 )
 
-func (l *ChainLedger) CreateEVMAccount(addr common.Address) {
+func (l *SimpleLedger) CreateEVMAccount(addr common.Address) {
 	l.GetOrCreateAccount(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) SubEVMBalance(addr common.Address, amount *big.Int) {
+func (l *SimpleLedger) SubEVMBalance(addr common.Address, amount *big.Int) {
 	l.SubBalance(types.NewAddress(addr.Bytes()), amount)
 }
 
-func (l *ChainLedger) AddEVMBalance(addr common.Address, amount *big.Int) {
+func (l *SimpleLedger) AddEVMBalance(addr common.Address, amount *big.Int) {
 	l.AddBalance(types.NewAddress(addr.Bytes()), amount)
 }
 
-func (l *ChainLedger) GetEVMBalance(addr common.Address) *big.Int {
+func (l *SimpleLedger) GetEVMBalance(addr common.Address) *big.Int {
 	return l.GetBalance(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) GetEVMNonce(addr common.Address) uint64 {
+func (l *SimpleLedger) GetEVMNonce(addr common.Address) uint64 {
 	return l.GetNonce(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) SetEVMNonce(addr common.Address, nonce uint64) {
+func (l *SimpleLedger) SetEVMNonce(addr common.Address, nonce uint64) {
 	l.SetNonce(types.NewAddress(addr.Bytes()), nonce)
 }
 
-func (l *ChainLedger) GetEVMCodeHash(addr common.Address) common.Hash {
+func (l *SimpleLedger) GetEVMCodeHash(addr common.Address) common.Hash {
 	return common.BytesToHash(l.GetCodeHash(types.NewAddress(addr.Bytes())).Bytes())
 }
 
-func (l *ChainLedger) GetEVMCode(addr common.Address) []byte {
+func (l *SimpleLedger) GetEVMCode(addr common.Address) []byte {
 	return l.GetCode(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) SetEVMCode(addr common.Address, code []byte) {
+func (l *SimpleLedger) SetEVMCode(addr common.Address, code []byte) {
 	l.SetCode(types.NewAddress(addr.Bytes()), code)
 }
 
-func (l *ChainLedger) GetEVMCodeSize(addr common.Address) int {
+func (l *SimpleLedger) GetEVMCodeSize(addr common.Address) int {
 	return l.GetCodeSize(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) AddEVMRefund(gas uint64) {
+func (l *SimpleLedger) AddEVMRefund(gas uint64) {
 	l.AddRefund(gas)
 }
 
-func (l *ChainLedger) SubEVMRefund(gas uint64) {
+func (l *SimpleLedger) SubEVMRefund(gas uint64) {
 	l.SubRefund(gas)
 }
 
-func (l *ChainLedger) GetEVMRefund() uint64 {
+func (l *SimpleLedger) GetEVMRefund() uint64 {
 	return l.GetRefund()
 }
 
-func (l *ChainLedger) GetEVMCommittedState(addr common.Address, hash common.Hash) common.Hash {
+func (l *SimpleLedger) GetEVMCommittedState(addr common.Address, hash common.Hash) common.Hash {
 	ret := l.GetCommittedState(types.NewAddress(addr.Bytes()), hash.Bytes())
 	return common.BytesToHash(ret)
 }
 
-func (l *ChainLedger) GetEVMState(addr common.Address, hash common.Hash) common.Hash {
+func (l *SimpleLedger) GetEVMState(addr common.Address, hash common.Hash) common.Hash {
 	ok, ret := l.GetState(types.NewAddress(addr.Bytes()), hash.Bytes())
 	if !ok {
 		return common.Hash{}
@@ -75,77 +76,73 @@ func (l *ChainLedger) GetEVMState(addr common.Address, hash common.Hash) common.
 	return common.BytesToHash(ret)
 }
 
-func (l *ChainLedger) SetEVMState(addr common.Address, key, value common.Hash) {
+func (l *SimpleLedger) SetEVMState(addr common.Address, key, value common.Hash) {
 	l.SetState(types.NewAddress(addr.Bytes()), key.Bytes(), value.Bytes())
 }
 
-func (l *ChainLedger) SuisideEVM(addr common.Address) bool {
+func (l *SimpleLedger) SuisideEVM(addr common.Address) bool {
 	return l.Suiside(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) HasSuisideEVM(addr common.Address) bool {
+func (l *SimpleLedger) HasSuisideEVM(addr common.Address) bool {
 	return l.HasSuiside(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) ExistEVM(addr common.Address) bool {
+func (l *SimpleLedger) ExistEVM(addr common.Address) bool {
 	return l.Exist(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) EmptyEVM(addr common.Address) bool {
+func (l *SimpleLedger) EmptyEVM(addr common.Address) bool {
 	return l.Empty(types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) PrepareEVMAccessList(sender common.Address, dest *common.Address, preEVMcompiles []common.Address, txEVMAccesses etherTypes.AccessList) {
+func (l *SimpleLedger) PrepareEVMAccessList(sender common.Address, dest *common.Address, preEVMcompiles []common.Address, txEVMAccesses etherTypes.AccessList) {
 	var precompiles []types.Address
 	for _, compile := range preEVMcompiles {
 		precompiles = append(precompiles, *types.NewAddress(compile.Bytes()))
 	}
-	var txAccesses AccessList
+	var txAccesses ledger2.AccessTupleList
 	for _, list := range txEVMAccesses {
 		var storageKeys []types.Hash
 		for _, keys := range list.StorageKeys {
 			storageKeys = append(storageKeys, *types.NewHash(keys.Bytes()))
 		}
-		txAccesses = append(txAccesses, AccessTuple{Address: *types.NewAddress(list.Address.Bytes()), StorageKeys: storageKeys})
+		txAccesses = append(txAccesses, ledger2.AccessTuple{Address: *types.NewAddress(list.Address.Bytes()), StorageKeys: storageKeys})
 	}
 	l.PrepareAccessList(*types.NewAddress(sender.Bytes()), types.NewAddress(dest.Bytes()), precompiles, txAccesses)
 }
 
-func (l *ChainLedger) AddressInEVMAccessList(addr common.Address) bool {
+func (l *SimpleLedger) AddressInEVMAccessList(addr common.Address) bool {
 	return l.AddressInAccessList(*types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) SlotInEVMAceessList(addr common.Address, slot common.Hash) (bool, bool) {
+func (l *SimpleLedger) SlotInEVMAceessList(addr common.Address, slot common.Hash) (bool, bool) {
 	return l.SlotInAccessList(*types.NewAddress(addr.Bytes()), *types.NewHash(slot.Bytes()))
 }
 
-func (l *ChainLedger) AddAddressToEVMAccessList(addr common.Address) {
+func (l *SimpleLedger) AddAddressToEVMAccessList(addr common.Address) {
 	l.AddAddressToAccessList(*types.NewAddress(addr.Bytes()))
 }
 
-func (l *ChainLedger) AddSlotToEVMAccessList(addr common.Address, slot common.Hash) {
+func (l *SimpleLedger) AddSlotToEVMAccessList(addr common.Address, slot common.Hash) {
 	l.AddSlotToAccessList(*types.NewAddress(addr.Bytes()), *types.NewHash(slot.Bytes()))
 }
 
-func (l *ChainLedger) AddEVMPreimage(hash common.Hash, data []byte) {
+func (l *SimpleLedger) AddEVMPreimage(hash common.Hash, data []byte) {
 	l.AddPreimage(*types.NewHash(hash.Bytes()), data)
 }
 
-func (l *ChainLedger) PrepareEVM(hash common.Hash, index int) {
+func (l *SimpleLedger) PrepareEVM(hash common.Hash, index int) {
 	l.logs.thash = types.NewHash(hash.Bytes())
 	l.logs.txIndex = index
-	l.accessList = newAccessList()
+	l.accessList = ledger2.NewAccessList()
 }
 
-func (l *ChainLedger) StateDB() vm.StateDB {
+func (l *SimpleLedger) StateDB() ledger2.StateDB {
 	return l
 }
 
-func (l *ChainLedger) GetBlockEVMHash(height uint64) common.Hash {
-	return common.BytesToHash(l.GetBlockHash(height).Bytes())
-}
-
-func (l *ChainLedger) AddEVMLog(log *etherTypes.Log) {
+func (l *SimpleLedger) AddEVMLog(log *etherTypes.Log) {
 	var topics []types.Hash
 	for _, topic := range log.Topics {
 		topics = append(topics, *types.NewHash(topic.Bytes()))
@@ -200,11 +197,31 @@ func CreateBloom(receipts EvmReceipts) *types.Bloom {
 				bin.Add(b.Bytes())
 			}
 		}
+		if receipt.Bloom != nil {
+			bin.OrBloom(receipt.Bloom)
+		}
 	}
 	return &bin
 }
 
-func NewMessage(tx *pb.EthTransaction) etherTypes.Message {
+func NewBxhTxFromEth(tx *types2.EthTransaction) *pb.BxhTransaction {
+	return &pb.BxhTransaction{
+		Version:         tx.GetVersion(),
+		From:            tx.GetFrom(),
+		To:              tx.GetTo(),
+		Timestamp:       tx.GetTimeStamp(),
+		TransactionHash: tx.GetHash(),
+		Payload:         tx.GetPayload(),
+		IBTP:            tx.GetIBTP(),
+		Nonce:           tx.GetNonce(),
+		Amount:          tx.GetValue().String(),
+		Typ:             pb.TxType_EthSignedBxhTx,
+		Signature:       tx.GetSignature(),
+		Extra:           tx.GetExtra(),
+	}
+}
+
+func NewMessageFromBxh(tx *pb.BxhTransaction) etherTypes.Message {
 	from := common.BytesToAddress(tx.GetFrom().Bytes())
 	var to *common.Address
 	if tx.GetTo() != nil {
@@ -212,16 +229,18 @@ func NewMessage(tx *pb.EthTransaction) etherTypes.Message {
 		to = &toAddr
 	}
 	nonce := tx.GetNonce()
-	amount := new(big.Int).SetUint64(tx.GetAmount())
-	gas := tx.GetGas()
+	amount, _ := new(big.Int).SetString("0", 10)
+	gas := uint64(1000000)
 	gasPrice := tx.GetGasPrice()
+	gasFeeCap := new(big.Int).SetInt64(0)
+	gasTipCap := new(big.Int).SetInt64(0)
 	data := tx.GetPayload()
-	accessList := tx.AccessList()
+	accessList := new(etherTypes.AccessList)
 
 	checkNonce := true
 	if v, _, _ := tx.GetRawSignature(); v == nil {
 		checkNonce = false
 	}
 
-	return etherTypes.NewMessage(from, to, nonce, amount, gas, gasPrice, data, accessList, checkNonce)
+	return etherTypes.NewMessage(from, to, nonce, amount, gas, gasPrice, gasFeeCap, gasTipCap, data, *accessList, checkNonce)
 }

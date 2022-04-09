@@ -2,12 +2,17 @@ package repo
 
 import (
 	"encoding/json"
+	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/event"
+	"github.com/fsnotify/fsnotify"
 	"github.com/mitchellh/go-homedir"
+	ma "github.com/multiformats/go-multiaddr"
 	"github.com/spf13/viper"
 )
 
@@ -24,6 +29,28 @@ const (
 	KeyName = "key.json"
 	// API name
 	APIName = "api"
+	// admin weight
+	SuperAdminWeight  = 2
+	NormalAdminWeight = 1
+	// governance strategy default participate threshold
+	DefaultSimpleMajorityExpression = "a > 0.5 * t"
+	DefaultZeroStrategyExpression   = "a >= 0"
+	//Passwd
+	DefaultPasswd = "bitxhub"
+
+	SuperMajorityApprove = "SuperMajorityApprove"
+	SuperMajorityAgainst = "SuperMajorityAgainst"
+	SimpleMajority       = "SimpleMajority"
+	ZeroPermission       = "ZeroPermission"
+
+	AppchainMgr         = "appchain_mgr"
+	RuleMgr             = "rule_mgr"
+	NodeMgr             = "node_mgr"
+	ServiceMgr          = "service_mgr"
+	RoleMgr             = "role_mgr"
+	ProposalStrategyMgr = "proposal_strategy_mgr"
+	DappMgr             = "dapp_mgr"
+	AllMgr              = "all_mgr"
 )
 
 type Config struct {
@@ -34,6 +61,7 @@ type Config struct {
 	PProf    `json:"pprof"`
 	Monitor  `json:"monitor"`
 	Limiter  `json:"limiter"`
+	Appchain `json:"appchain"`
 	Gateway  `json:"gateway"`
 	Ping     `json:"ping"`
 	Log      `json:"log"`
@@ -41,15 +69,20 @@ type Config struct {
 	Txpool   `json:"txpool"`
 	Order    `json:"order"`
 	Executor `json:"executor"`
+	Ledger   `json:"ledger"`
 	Genesis  `json:"genesis"`
 	Security Security `toml:"security" json:"security"`
+	License  License  `toml:"license" json:"license"`
+	Crypto   Crypto   `toml:"crypto" json:"crypto"`
 }
 
 // Security are files used to setup connection with tls
 type Security struct {
-	EnableTLS     bool   `mapstructure:"enable_tls"`
-	PemFilePath   string `mapstructure:"pem_file_path" json:"pem_file_path"`
-	ServerKeyPath string `mapstructure:"server_key_path" json:"server_key_path"`
+	EnableTLS       bool   `mapstructure:"enable_tls"`
+	PemFilePath     string `mapstructure:"pem_file_path" json:"pem_file_path"`
+	ServerKeyPath   string `mapstructure:"server_key_path" json:"server_key_path"`
+	GatewayCertPath string `mapstructure:"gateway_cert_path" json:"gateway_cert_path"`
+	GatewayKeyPath  string `mapstructure:"gateway_key_path" json:"gateway_key_path"`
 }
 
 type Port struct {
@@ -77,6 +110,11 @@ type Limiter struct {
 	Capacity int64         `toml:"capacity" json:"capacity"`
 }
 
+type Appchain struct {
+	Enable        bool   `toml:"enable" json:"enable"`
+	EthHeaderPath string `mapstructure:"eth_header_path"`
+}
+
 type Gateway struct {
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
@@ -102,14 +140,22 @@ type LogModule struct {
 	API       string `toml:"api" json:"api"`
 	CoreAPI   string `mapstructure:"coreapi" toml:"coreapi" json:"coreapi"`
 	Storage   string `toml:"storage" json:"storage"`
+	Profile   string `toml:"profile" json:"profile"`
+}
+
+type Strategy struct {
+	Module string `json:"module" toml:"module"`
+	Typ    string `json:"typ" toml:"typ"`
+	Extra  string `json:"extra" toml:"extra"`
 }
 
 type Genesis struct {
-	ChainID  uint64            `json:"chainid" toml:"chainid"`
-	GasLimit uint64            `json:"gas_limit" toml:"gas_limit"`
-	Admins   []*Admin          `json:"admins" toml:"admins"`
-	Strategy map[string]string `json:"strategy" toml:"strategy"`
-	Dider    string            `json:"dider" toml:"dider"`
+	ChainID     uint64      `json:"chainid" toml:"chainid"`
+	GasLimit    uint64      `mapstructure:"gas_limit" json:"gas_limit" toml:"gas_limit"`
+	BvmGasPrice uint64      `mapstructure:"bvm_gas_price" json:"bvm_gas_price" toml:"bvm_gas_price"`
+	Balance     string      `json:"balance" toml:"balance"`
+	Admins      []*Admin    `json:"admins" toml:"admins"`
+	Strategy    []*Strategy `json:"strategy" toml:"strategy"`
 }
 
 type Admin struct {
@@ -130,11 +176,24 @@ type Txpool struct {
 }
 
 type Order struct {
-	Plugin string `toml:"plugin" json:"plugin"`
+	Type string `toml:"type" json:"type"`
 }
 
 type Executor struct {
 	Type string `toml:"type" json:"type"`
+}
+
+type Ledger struct {
+	Type string `toml:"type" json:"type"`
+}
+
+type License struct {
+	Key      string `toml:"key" json:"key"`
+	Verifier string `toml:"verifier" json:"verifier"`
+}
+
+type Crypto struct {
+	Algorithms []string `json:"algorithms" toml:"algorithms"`
 }
 
 func (c *Config) Bytes() ([]byte, error) {
@@ -183,27 +242,42 @@ func DefaultConfig() (*Config, error) {
 			BatchTimeout: 500 * time.Millisecond,
 		},
 		Order: Order{
-			Plugin: "plugins/raft.so",
+			Type: "raft",
 		},
 		Executor: Executor{
 			Type: "serial",
 		},
 		Genesis: Genesis{
 			ChainID:  1,
-			GasLimit: 0x2fefd8,
+			GasLimit: 0x5f5e100,
+			Balance:  "100000000000000000000000000000000000",
 		},
+		Ledger: Ledger{Type: "complex"},
+		Crypto: Crypto{Algorithms: []string{"Secp256k1"}},
 	}, nil
 }
 
-func UnmarshalConfig(repoRoot string) (*Config, error) {
-	viper.SetConfigFile(filepath.Join(repoRoot, configName))
+func UnmarshalConfig(viper *viper.Viper, repoRoot string, configPath string) (*Config, error) {
+	if len(configPath) == 0 {
+		viper.SetConfigFile(filepath.Join(repoRoot, configName))
+	} else {
+		viper.SetConfigFile(configPath)
+		fileData, err := ioutil.ReadFile(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("read bitxhub config error: %w", err)
+		}
+		err = ioutil.WriteFile(filepath.Join(repoRoot, configName), fileData, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("write bitxhub config failed: %w", err)
+		}
+	}
 	viper.SetConfigType("toml")
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("BITXHUB")
 	replacer := strings.NewReplacer(".", "_")
 	viper.SetEnvKeyReplacer(replacer)
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("readInConfig error: %w", err)
 	}
 
 	config, err := DefaultConfig()
@@ -212,24 +286,94 @@ func UnmarshalConfig(repoRoot string) (*Config, error) {
 	}
 
 	if err := viper.Unmarshal(config); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal config error: %w", err)
 	}
 
 	config.RepoRoot = repoRoot
-
 	return config, nil
 }
 
-func ReadConfig(path, configType string, config interface{}) error {
-	v := viper.New()
+func WatchBitxhubConfig(viper *viper.Viper, feed *event.Feed) {
+	viper.WatchConfig()
+	viper.OnConfigChange(func(in fsnotify.Event) {
+		fmt.Println("bitxhub config file changed: ", in.String())
+
+		config, err := DefaultConfig()
+		if err != nil {
+			fmt.Println("get default config: ", err)
+			return
+		}
+
+		if err := viper.Unmarshal(config); err != nil {
+			fmt.Println("unmarshal config: ", err)
+			return
+		}
+
+		feed.Send(&Repo{Config: config})
+	})
+}
+
+func WatchNetworkConfig(viper *viper.Viper, feed *event.Feed) {
+	viper.WatchConfig()
+	viper.OnConfigChange(func(in fsnotify.Event) {
+		fmt.Println("network config file changed: ", in.String())
+		var config *NetworkConfig
+		if err := viper.Unmarshal(config); err != nil {
+			fmt.Println("unmarshal config: ", err)
+			return
+		}
+
+		checkReaptAddr := make(map[string]uint64)
+		for _, node := range config.Nodes {
+			if node.ID == config.ID {
+				if len(node.Hosts) == 0 {
+					fmt.Printf("no hosts found by node:%d \n", node.ID)
+					return
+				}
+				config.LocalAddr = node.Hosts[0]
+				addr, err := ma.NewMultiaddr(fmt.Sprintf("%s%s", node.Hosts[0], node.Pid))
+				if err != nil {
+					fmt.Printf("new multiaddr: %v \n", err)
+					return
+				}
+				config.LocalAddr = strings.Replace(config.LocalAddr, ma.Split(addr)[0].String(), "/ip4/0.0.0.0", -1)
+			}
+
+			if _, ok := checkReaptAddr[node.Hosts[0]]; !ok {
+				checkReaptAddr[node.Hosts[0]] = node.ID
+			} else {
+				err := fmt.Errorf("reapt address with Node: nodeID = %d,Host = %s \n",
+					checkReaptAddr[node.Hosts[0]], node.Hosts[0])
+				panic(err)
+			}
+		}
+
+		if config.LocalAddr == "" {
+			fmt.Printf("lack of local address \n")
+			return
+		}
+
+		idx := strings.LastIndex(config.LocalAddr, "/p2p/")
+		if idx == -1 {
+			fmt.Printf("pid is not existed in bootstrap \n")
+			return
+		}
+
+		config.LocalAddr = config.LocalAddr[:idx]
+
+		feed.Send(&Repo{NetworkConfig: config})
+	})
+}
+
+func ReadConfig(v *viper.Viper, path, configType string, config interface{}) error {
 	v.SetConfigFile(path)
 	v.SetConfigType(configType)
 	if err := v.ReadInConfig(); err != nil {
-		return err
+		return fmt.Errorf("readInConfig error: %w", err)
 	}
 
 	if err := v.Unmarshal(config); err != nil {
-		return err
+		return fmt.Errorf("unmarshal config error: %w", err)
 	}
 
 	return nil

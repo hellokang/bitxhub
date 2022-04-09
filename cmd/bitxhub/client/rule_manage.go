@@ -3,128 +3,61 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-
-	ruleMgr "github.com/meshplus/bitxhub-core/rule-mgr"
+	"strconv"
 
 	"github.com/fatih/color"
+	ruleMgr "github.com/meshplus/bitxhub-core/rule-mgr"
 	"github.com/meshplus/bitxhub-model/constant"
 	"github.com/meshplus/bitxhub-model/pb"
+	"github.com/tidwall/gjson"
 	"github.com/urfave/cli"
 )
 
 func ruleMgrCMD() cli.Command {
 	return cli.Command{
 		Name:  "rule",
-		Usage: "rule manage command",
+		Usage: "Rule manage command",
 		Subcommands: cli.Commands{
 			cli.Command{
 				Name:  "all",
-				Usage: "query all rules info of one chain",
+				Usage: "Query all rules info of one appchain",
 				Flags: []cli.Flag{
 					cli.StringFlag{
 						Name:     "id",
-						Usage:    "chain id",
+						Usage:    "Specify appchain id",
 						Required: true,
 					},
 				},
 				Action: getRulesList,
 			},
 			cli.Command{
-				Name:  "available",
-				Usage: "query available rule address of a chain",
+				Name:  "master",
+				Usage: "Query master rule address of one appchain",
 				Flags: []cli.Flag{
 					cli.StringFlag{
 						Name:     "id",
-						Usage:    "chain id",
+						Usage:    "Specify appchain id",
 						Required: true,
 					},
 				},
-				Action: getAvailableRuleAddress,
+				Action: getMasterRuleAddress,
 			},
 			cli.Command{
 				Name:  "status",
-				Usage: "query rule status by rule address and chain id",
+				Usage: "Query rule status by rule address and appchain id",
 				Flags: []cli.Flag{
 					cli.StringFlag{
 						Name:     "id",
-						Usage:    "chain id",
+						Usage:    "Specify appchain id",
 						Required: true,
 					},
 					cli.StringFlag{
 						Name:     "addr",
-						Usage:    "rule addr",
+						Usage:    "Specify rule addr",
 						Required: true,
 					},
 				},
 				Action: getRuleStatus,
-			},
-			cli.Command{
-				Name:  "bind",
-				Usage: "bind rule with chain id",
-				Flags: []cli.Flag{
-					cli.StringFlag{
-						Name:     "id",
-						Usage:    "chain id",
-						Required: true,
-					},
-					cli.StringFlag{
-						Name:     "addr",
-						Usage:    "rule address",
-						Required: true,
-					},
-				},
-				Action: bindRule,
-			},
-			cli.Command{
-				Name:  "unbind",
-				Usage: "unbind rule with chain id",
-				Flags: []cli.Flag{
-					cli.StringFlag{
-						Name:     "id",
-						Usage:    "chain id",
-						Required: true,
-					},
-					cli.StringFlag{
-						Name:     "addr",
-						Usage:    "rule address",
-						Required: true,
-					},
-				},
-				Action: unbindRule,
-			},
-			cli.Command{
-				Name:  "freeze",
-				Usage: "freeze rule by chain id and rule address",
-				Flags: []cli.Flag{
-					cli.StringFlag{
-						Name:     "id",
-						Usage:    "chain id",
-						Required: true,
-					},
-					cli.StringFlag{
-						Name:     "addr",
-						Usage:    "rule address",
-						Required: true,
-					},
-				},
-				Action: freezeRule,
-			},
-			cli.Command{
-				Name:  "activate",
-				Usage: "activate rule by chain id and rule address",
-				Flags: []cli.Flag{
-					cli.StringFlag{
-						Name:     "id",
-						Usage:    "chain id",
-						Required: true,
-					},
-					cli.StringFlag{
-						Name:     "addr",
-						Usage:    "rule address",
-						Required: true,
-					},
-				},
-				Action: activateRule,
 			},
 		},
 	}
@@ -133,15 +66,17 @@ func ruleMgrCMD() cli.Command {
 func getRulesList(ctx *cli.Context) error {
 	id := ctx.String("id")
 
-	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "Rules", pb.String(id))
+	receipt, err := invokeBVMContractBySendView(ctx, constant.RuleManagerContractAddr.String(), "Rules", pb.String(id))
 	if err != nil {
-		return err
+		return fmt.Errorf("invoke BVM contract failed when get rules list: %w", err)
 	}
 
 	if receipt.IsSuccess() {
 		rules := make([]*ruleMgr.Rule, 0)
-		if err := json.Unmarshal(receipt.Ret, &rules); err != nil {
-			return fmt.Errorf("unmarshal rules error: %w", err)
+		if receipt.Ret != nil {
+			if err := json.Unmarshal(receipt.Ret, &rules); err != nil {
+				return fmt.Errorf("unmarshal rules error: %w", err)
+			}
 		}
 		printRule(rules)
 	} else {
@@ -150,16 +85,20 @@ func getRulesList(ctx *cli.Context) error {
 	return nil
 }
 
-func getAvailableRuleAddress(ctx *cli.Context) error {
+func getMasterRuleAddress(ctx *cli.Context) error {
 	id := ctx.String("id")
 
-	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "GetRuleAddress", pb.String(id))
+	receipt, err := invokeBVMContractBySendView(ctx, constant.RuleManagerContractAddr.String(), "GetMasterRule", pb.String(id))
 	if err != nil {
+		return fmt.Errorf("invoke BVM contract failed when get master rule for chain %s: %w", id, err)
+	}
+	rule := &ruleMgr.Rule{}
+	if err := json.Unmarshal(receipt.Ret, rule); err != nil {
 		return err
 	}
 
 	if receipt.IsSuccess() {
-		color.Green("available rule address is %s", string(receipt.Ret))
+		color.Green("available rule address is %s", rule.Address)
 	} else {
 		color.Red("get available rule address error: %s\n", string(receipt.Ret))
 	}
@@ -170,9 +109,9 @@ func getRuleStatus(ctx *cli.Context) error {
 	chainId := ctx.String("id")
 	ruleAddr := ctx.String("addr")
 
-	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "GetRuleByAddr", pb.String(chainId), pb.String(ruleAddr))
+	receipt, err := invokeBVMContractBySendView(ctx, constant.RuleManagerContractAddr.String(), "GetRuleByAddr", pb.String(chainId), pb.String(ruleAddr))
 	if err != nil {
-		return err
+		return fmt.Errorf("invoke BVM contract failed when get rule %s for chain %s: %w", ruleAddr, chainId, err)
 	}
 
 	if receipt.IsSuccess() {
@@ -187,83 +126,37 @@ func getRuleStatus(ctx *cli.Context) error {
 	return nil
 }
 
-func bindRule(ctx *cli.Context) error {
+func updateRule(ctx *cli.Context) error {
 	id := ctx.String("id")
 	addr := ctx.String("addr")
+	reason := ctx.String("reason")
 
-	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "BindRule", pb.String(id), pb.String(addr))
+	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "UpdateMasterRule", pb.String(id), pb.String(addr), pb.String(reason))
 	if err != nil {
-		return err
+		return fmt.Errorf("invoke BVM contract failed when update master rule \" id=%s,addr=%s,reason=%s \": %w",
+			id, addr, reason, err)
 	}
 
 	if receipt.IsSuccess() {
-		color.Green("proposal id is %s", string(receipt.Ret))
+		proposalId := gjson.Get(string(receipt.Ret), "proposal_id").String()
+		color.Green("proposal id is %s", proposalId)
 	} else {
-		color.Red("bind rule error: %s\n", string(receipt.Ret))
-	}
-	return nil
-}
-
-func unbindRule(ctx *cli.Context) error {
-	id := ctx.String("id")
-	addr := ctx.String("addr")
-
-	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "UnbindRule", pb.String(id), pb.String(addr))
-	if err != nil {
-		return err
-	}
-
-	if receipt.IsSuccess() {
-		color.Green("proposal id is %s", string(receipt.Ret))
-	} else {
-		color.Red("unbind rule error: %s\n", string(receipt.Ret))
-	}
-	return nil
-}
-
-func freezeRule(ctx *cli.Context) error {
-	id := ctx.String("id")
-	addr := ctx.String("addr")
-
-	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "FreezeRule", pb.String(id), pb.String(addr))
-	if err != nil {
-		return err
-	}
-
-	if receipt.IsSuccess() {
-		color.Green("proposal id is %s", string(receipt.Ret))
-	} else {
-		color.Red("freeze rule error: %s\n", string(receipt.Ret))
-	}
-	return nil
-}
-
-func activateRule(ctx *cli.Context) error {
-	id := ctx.String("id")
-	addr := ctx.String("addr")
-
-	receipt, err := invokeBVMContract(ctx, constant.RuleManagerContractAddr.String(), "ActivateRule", pb.String(id), pb.String(addr))
-	if err != nil {
-		return err
-	}
-
-	if receipt.IsSuccess() {
-		color.Green("proposal id is %s", string(receipt.Ret))
-	} else {
-		color.Red("activate rule error: %s\n", string(receipt.Ret))
+		color.Red("update rule error: %s\n", string(receipt.Ret))
 	}
 	return nil
 }
 
 func printRule(rules []*ruleMgr.Rule) {
 	var table [][]string
-	table = append(table, []string{"ChainId", "RuleAddress", "Status"})
+	table = append(table, []string{"ChainID", "RuleAddress", "Status", "Master", "CreateTime"})
 
 	for _, r := range rules {
 		table = append(table, []string{
-			r.ChainId,
+			r.ChainID,
 			r.Address,
 			string(r.Status),
+			strconv.FormatBool(r.Master),
+			strconv.Itoa(int(r.CreateTime)),
 		})
 	}
 

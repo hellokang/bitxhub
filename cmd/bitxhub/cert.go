@@ -43,38 +43,38 @@ var caCMD = cli.Command{
 	Action: func(ctx *cli.Context) error {
 		privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
-			return err
+			return fmt.Errorf("generate key failed: %w", err)
 		}
 
 		priKeyEncode, err := x509.MarshalECPrivateKey(privKey)
 		if err != nil {
-			return err
+			return fmt.Errorf("marshal EC private key error: %w", err)
 		}
 
 		f, err := os.Create("./ca.priv")
 		if err != nil {
-			return err
+			return fmt.Errorf("create ./ca.priv failed: %w", err)
 		}
 		defer f.Close()
 
 		err = pem.Encode(f, &pem.Block{Type: "EC PRIVATE KEY", Bytes: priKeyEncode})
 		if err != nil {
-			return err
+			return fmt.Errorf("pem encode error: %w", err)
 		}
 
 		c, err := libp2pcert.GenerateCert(privKey, true, "Hyperchain")
 		if err != nil {
-			return err
+			return fmt.Errorf("generate cert failed: %w", err)
 		}
 
 		x509certEncode, err := x509.CreateCertificate(rand.Reader, c, c, privKey.Public(), privKey)
 		if err != nil {
-			return err
+			return fmt.Errorf("create X.509v3 certificate failed: %w", err)
 		}
 
 		f, err = os.Create("./ca.cert")
 		if err != nil {
-			return err
+			return fmt.Errorf("create ./ca.cert failed: %w", err)
 		}
 		defer f.Close()
 
@@ -98,7 +98,7 @@ var csrCMD = cli.Command{
 		},
 		cli.StringFlag{
 			Name:  "target",
-			Usage: "Specific target directory",
+			Usage: "Specify target directory",
 		},
 	},
 	Action: func(ctx *cli.Context) error {
@@ -108,12 +108,12 @@ var csrCMD = cli.Command{
 
 		privData, err := ioutil.ReadFile(privPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("read private key error: %w", err)
 		}
 		block, _ := pem.Decode(privData)
 		privKey, err := x509.ParseECPrivateKey(block.Bytes)
 		if err != nil {
-			return fmt.Errorf("Error occured when parsing private key. Please make sure it's secp256r1 private key.")
+			return fmt.Errorf("Error occurred when parsing private key. Please make sure it's secp256r1 private key.")
 		}
 
 		template := &x509.CertificateRequest{
@@ -130,7 +130,7 @@ var csrCMD = cli.Command{
 		}
 		data, err := x509.CreateCertificateRequest(rand.Reader, template, privKey)
 		if err != nil {
-			return err
+			return fmt.Errorf("create certificate request failed: %w", err)
 		}
 
 		name := getFileName(privPath)
@@ -138,7 +138,7 @@ var csrCMD = cli.Command{
 		path := filepath.Join(target, fmt.Sprintf("%s.csr", name))
 		f, err := os.Create(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("create %s failed: %w", path, err)
 		}
 		defer f.Close()
 
@@ -188,12 +188,12 @@ var issueCMD = cli.Command{
 		block, _ := pem.Decode(privData)
 		privKey, err := x509.ParseECPrivateKey(block.Bytes)
 		if err != nil {
-			return fmt.Errorf("Error occured when parsing private key. Please make sure it's secp256r1 private key.")
+			return fmt.Errorf("Error occurred when parsing private key. Please make sure it's secp256r1 private key.")
 		}
 
 		caCertData, err := ioutil.ReadFile(certPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("read ca cert error: %w", err)
 		}
 		block, _ = pem.Decode(caCertData)
 		caCert, err := x509.ParseCertificate(block.Bytes)
@@ -219,7 +219,7 @@ var issueCMD = cli.Command{
 
 		sn, err := rand.Int(rand.Reader, big.NewInt(1000000))
 		if err != nil {
-			return err
+			return fmt.Errorf("generate rand number failed: %w", err)
 		}
 
 		notBefore := time.Now().Add(-5 * time.Minute).UTC()
@@ -245,13 +245,15 @@ var issueCMD = cli.Command{
 		if err != nil {
 			return fmt.Errorf("create cert: %w", err)
 		}
-
-		name := getFileName(csrPath)
+		name := ctx.String("target_name")
+		if strings.EqualFold("", name) {
+			name = getFileName(csrPath)
+		}
 
 		path := filepath.Join(target, fmt.Sprintf("%s.cert", name))
 		f, err := os.Create(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("create %s failed: %w", path, err)
 		}
 		defer f.Close()
 
@@ -261,11 +263,11 @@ var issueCMD = cli.Command{
 
 var parseCMD = cli.Command{
 	Name:  "parse",
-	Usage: "parse certification",
+	Usage: "Parse certification",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:     "path",
-			Usage:    "certification path",
+			Usage:    "Specify certification path",
 			Required: true,
 		},
 	},
@@ -274,17 +276,17 @@ var parseCMD = cli.Command{
 
 		data, err := ioutil.ReadFile(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("read certificate error: %w", err)
 		}
 		block, _ := pem.Decode(data)
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return fmt.Errorf("parse cert: %w", err)
+			return fmt.Errorf("parse cert failed: %w", err)
 		}
 
 		ret, err := json.Marshal(cert)
 		if err != nil {
-			return err
+			return fmt.Errorf("marshal cert error: %w", err)
 		}
 
 		fmt.Println(string(ret))
@@ -303,12 +305,12 @@ var privCMD = cli.Command{
 			Flags: []cli.Flag{
 				cli.StringFlag{
 					Name:     "name",
-					Usage:    "Specific private key name",
+					Usage:    "Specify private key name",
 					Required: true,
 				},
 				cli.StringFlag{
 					Name:  "target",
-					Usage: "Specific target directory",
+					Usage: "Specify target directory",
 				},
 			},
 			Action: func(ctx *cli.Context) error {
@@ -321,7 +323,7 @@ var privCMD = cli.Command{
 			Flags: []cli.Flag{
 				cli.StringFlag{
 					Name:     "path",
-					Usage:    "Specific private key path",
+					Usage:    "Specify private key path",
 					Required: true,
 				},
 			},
@@ -330,7 +332,7 @@ var privCMD = cli.Command{
 
 				pid, err := repo.GetPidFromPrivFile(privPath)
 				if err != nil {
-					return err
+					return fmt.Errorf("get pid from libp2p node priv file failed: %w", err)
 				}
 
 				fmt.Println(pid)
@@ -342,16 +344,16 @@ var privCMD = cli.Command{
 
 var verifyCMD = cli.Command{
 	Name:  "verify",
-	Usage: "verify cert",
+	Usage: "Verify cert",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:     "sub",
-			Usage:    "sub cert path",
+			Usage:    "Specify sub cert path",
 			Required: true,
 		},
 		cli.StringFlag{
 			Name:     "ca",
-			Usage:    "ca cert path",
+			Usage:    "Specify ca cert path",
 			Required: true,
 		},
 	},
@@ -361,7 +363,7 @@ var verifyCMD = cli.Command{
 
 		subCertData, err := ioutil.ReadFile(subPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("read sub cert error: %w", err)
 		}
 		block, _ := pem.Decode(subCertData)
 		subCert, err := x509.ParseCertificate(block.Bytes)
@@ -371,7 +373,7 @@ var verifyCMD = cli.Command{
 
 		caCertData, err := ioutil.ReadFile(caPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("read ca cert error: %w", err)
 		}
 		block, _ = pem.Decode(caCertData)
 		caCert, err := x509.ParseCertificate(block.Bytes)
@@ -400,34 +402,34 @@ func generatePrivKey(ctx *cli.Context, opt crypto.KeyType) error {
 
 	target, err := filepath.Abs(target)
 	if err != nil {
-		return fmt.Errorf("get absolute key path: %w", err)
+		return fmt.Errorf("get absolute key path failed: %w", err)
 	}
 
 	privKey, err := asym.GenerateKeyPair(opt)
 	if err != nil {
-		return fmt.Errorf("generate key: %w", err)
+		return fmt.Errorf("generate key failed: %w", err)
 	}
 
 	priKeyEncode, err := privKey.Bytes()
 	if err != nil {
-		return fmt.Errorf("marshal key: %w", err)
+		return fmt.Errorf("marshal key failed: %w", err)
 	}
 
 	if !fileutil.Exist(target) {
 		err := os.MkdirAll(target, 0755)
 		if err != nil {
-			return fmt.Errorf("create folder: %w", err)
+			return fmt.Errorf("create folder failed: %w", err)
 		}
 	}
 	path := filepath.Join(target, fmt.Sprintf("%s.priv", name))
 	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("create file: %w", err)
+		return fmt.Errorf("create %s failed: %w", path, err)
 	}
 
 	err = pem.Encode(f, &pem.Block{Type: "EC PRIVATE KEY", Bytes: priKeyEncode})
 	if err != nil {
-		return fmt.Errorf("pem encode: %w", err)
+		return fmt.Errorf("pem encode error: %w", err)
 	}
 
 	fmt.Printf("%s.priv key is generated under directory %s\n", name, target)

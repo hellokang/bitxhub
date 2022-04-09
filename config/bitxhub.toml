@@ -27,13 +27,19 @@ solo = false
 
 [security]
   enable_tls = false
-  pem_file_path = "certs/server.pem"
-  server_key_path = "certs/server.key"
+  pem_file_path = "certs/node.cert"
+  server_key_path = "certs/node.priv"
+  gateway_cert_path = "certs/gateway.cert"
+  gateway_key_path = "certs/gateway.priv"
 
 [limiter]
   interval= "50ms"
   quantum= 500
   capacity= 10000
+
+[appchain]
+  enable = false
+  eth_header_path="appchain/eth_header.json"
 
 [log]
   level = "info"
@@ -48,6 +54,7 @@ solo = false
     api = "info"
     coreapi = "info"
     storage = "info"
+    profile = "info"
 
 [cert]
   verify = true
@@ -56,29 +63,64 @@ solo = false
   ca_cert_path = "certs/ca.cert"
 
 [order]
-  plugin = "plugins/raft.so"
+  type = "raft"
 
 [executor]
   type = "serial"  # opensource version only supports serial type, commercial version supports serial and parallel types
 
+[crypto]
+  algorithms = ["Secp256k1", "ECDSA_P256", "ECDSA_P384","ECDSA_P521"]
+
+[ledger]
+  type = "simple"
+
 [genesis]
-  chainid = 1
-  gas_limit = 0x2fefd8
-  dider = "0xc7F999b83Af6DF9e67d0a37Ee7e900bF38b3D013"
+  chainid = 1356
+  gas_limit = 0x5f5e100
+  bvm_gas_price = 50000
+  balance = "100000000000000000000000000000000000"
   [[genesis.admins]]
     address = "0xc7F999b83Af6DF9e67d0a37Ee7e900bF38b3D013"
-    weight = 1
+    weight = 2 # 1：General Administrator 2: Super Administrator (Genesis Administrator)
   [[genesis.admins]]
     address = "0x79a1215469FaB6f9c63c1816b45183AD3624bE34"
-    weight = 1
+    weight = 2
   [[genesis.admins]]
     address = "0x97c8B516D19edBf575D72a172Af7F418BE498C37"
-    weight = 1
+    weight = 2
   [[genesis.admins]]
     address = "0xc0Ff2e0b3189132D815b8eb325bE17285AC898f8"
-    weight = 1
-  [genesis.strategy]
-    AppchainMgr = "SimpleMajority"
-    RuleMgr = "SimpleMajority"
-    NodeMgr = "SimpleMajority"
-    ServiceMgr = "SimpleMajority"
+    weight = 2
+  [[genesis.strategy]]
+    module = "appchain_mgr"
+    typ = "SimpleMajority"
+    extra = "a > 0.5 * t"
+  [[genesis.strategy]]
+    module = "proposal_strategy_mgr"
+    typ = "SimpleMajority"
+    extra = "a > 0.5 * t"
+  [[genesis.strategy]]
+    module = "rule_mgr"
+    typ = "SimpleMajority"
+    extra = "a > 0.5 * t"
+  [[genesis.strategy]]
+    module = "node_mgr"
+    typ = "SimpleMajority"
+    extra = "a > 0.5 * t"
+  [[genesis.strategy]]
+    module = "service_mgr"
+    typ = "SimpleMajority"
+    extra = "a > 0.5 * t"
+  [[genesis.strategy]]
+    module = "role_mgr"
+    typ = "SimpleMajority"
+    extra = "a > 0.5 * t"
+  [[genesis.strategy]]
+    module = "dapp_mgr"
+    typ = "SimpleMajority"
+    extra = "a > 0.5 * t"
+
+
+[license]
+  key = "133847740289a8dc5447bfbaedf10ed5ee9460110e4ba6b455e33cf941253527f18dd721515c5142fcea9b6415ddad6b3f1696011a4bbc86f35833ae9296a3ea"
+  verifier = "https://172.16.5.3:11443/v1/validation"

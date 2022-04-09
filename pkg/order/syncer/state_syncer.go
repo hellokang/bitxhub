@@ -8,9 +8,9 @@ import (
 
 	"github.com/Rican7/retry"
 	"github.com/Rican7/retry/strategy"
+	orderPeerMgr "github.com/meshplus/bitxhub-core/peer-mgr"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/pb"
-	"github.com/meshplus/bitxhub/pkg/peermgr"
 	"github.com/sirupsen/logrus"
 )
 
@@ -19,11 +19,11 @@ var _ Syncer = (*StateSyncer)(nil)
 const defaultBlockFetch = 5
 
 type StateSyncer struct {
-	blockFetch uint64              // amount of blocks to be fetched per retrieval request
-	peerMgr    peermgr.PeerManager // network manager
-	badPeers   *sync.Map           // peer node set who return bad block
-	quorum     uint64              // quorum node numbers
-	peerIds    []uint64            // peers who have current newly consensus state
+	blockFetch uint64                        // amount of blocks to be fetched per retrieval request
+	peerMgr    orderPeerMgr.OrderPeerManager // network manager
+	badPeers   *sync.Map                     // peer node set who return bad block
+	quorum     uint64                        // quorum node numbers
+	peerIds    []uint64                      // peers who have current newly consensus state
 	logger     logrus.FieldLogger
 }
 
@@ -32,7 +32,7 @@ type rangeHeight struct {
 	end   uint64
 }
 
-func New(blockFetch uint64, peerMgr peermgr.PeerManager, quorum uint64, peerIds []uint64, logger logrus.FieldLogger) (*StateSyncer, error) {
+func New(blockFetch uint64, peerMgr orderPeerMgr.OrderPeerManager, quorum uint64, peerIds []uint64, logger logrus.FieldLogger) (*StateSyncer, error) {
 	if blockFetch == 0 {
 		blockFetch = defaultBlockFetch
 	}
@@ -52,7 +52,7 @@ func New(blockFetch uint64, peerMgr peermgr.PeerManager, quorum uint64, peerIds 
 func (s *StateSyncer) SyncCFTBlocks(begin, end uint64, blockCh chan *pb.Block) error {
 	rangeHeights, err := s.calcRangeHeight(begin, end)
 	if err != nil {
-		return err
+		return fmt.Errorf("calculate range height failed: %w", err)
 	}
 
 	for _, rangeHeight := range rangeHeights {
@@ -73,8 +73,8 @@ func (s *StateSyncer) SyncCFTBlocks(begin, end uint64, blockCh chan *pb.Block) e
 			blocks, err := s.fetchBlocks(id, rangeTmp.begin, rangeTmp.end)
 			if err != nil {
 				s.badPeers.Store(id, nil)
-				s.logger.Errorf("fetch blocks error:%w", err)
-				return err
+				s.logger.Errorf("fetch blocks failed: %w", err)
+				return fmt.Errorf("fetch blocks failed: %w", err)
 			}
 			for _, block := range blocks {
 				blockCh <- block
@@ -93,7 +93,7 @@ func (s *StateSyncer) SyncCFTBlocks(begin, end uint64, blockCh chan *pb.Block) e
 func (s *StateSyncer) SyncBFTBlocks(begin, end uint64, metaHash *types.Hash, blockCh chan *pb.Block) error {
 	rangeHeights, err := s.calcRangeHeight(begin, end)
 	if err != nil {
-		return err
+		return fmt.Errorf("calculate range height failed: %w", err)
 	}
 
 	var parentBlockHash *types.Hash
@@ -228,7 +228,7 @@ func (s *StateSyncer) calcRangeHeight(begin, end uint64) ([]*rangeHeight, error)
 	}
 	startNo := begin / s.blockFetch
 	rangeHeights := make([]*rangeHeight, 0)
-	for ; begin <= end; {
+	for begin <= end {
 		rangeBegin := begin
 		rangeEnd := (startNo + 1) * s.blockFetch
 		if rangeEnd > end {
@@ -256,7 +256,7 @@ func (s *StateSyncer) fetchBlockHeaders(id uint64, begin, end uint64) ([]*pb.Blo
 	}
 	data, err := req.Marshal()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal get block header request error: %w", err)
 	}
 	m := &pb.Message{
 		Type: pb.Message_GET_BLOCK_HEADERS,
@@ -265,12 +265,12 @@ func (s *StateSyncer) fetchBlockHeaders(id uint64, begin, end uint64) ([]*pb.Blo
 
 	res, err := s.peerMgr.Send(id, m)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("send message to %d failed: %w", id, err)
 	}
 
 	blockHeaders := &pb.GetBlockHeadersResponse{}
 	if err := blockHeaders.Unmarshal(res.Data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal get block header response error: %w", err)
 	}
 	return blockHeaders.BlockHeaders, nil
 }
@@ -286,7 +286,7 @@ func (s *StateSyncer) fetchBlocks(id uint64, begin, end uint64) ([]*pb.Block, er
 	}
 	data, err := req.Marshal()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal get block header request error: %w", err)
 	}
 	m := &pb.Message{
 		Type: pb.Message_GET_BLOCKS,
@@ -295,12 +295,12 @@ func (s *StateSyncer) fetchBlocks(id uint64, begin, end uint64) ([]*pb.Block, er
 
 	res, err := s.peerMgr.Send(id, m)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("send message to %d failed: %w", id, err)
 	}
 
 	blocks := &pb.GetBlocksResponse{}
 	if err := blocks.Unmarshal(res.Data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal get block header response error: %w", err)
 	}
 	return blocks.Blocks, nil
 }

@@ -5,14 +5,15 @@
 package mock_peermgr
 
 import (
+	reflect "reflect"
+
 	event "github.com/ethereum/go-ethereum/event"
 	gomock "github.com/golang/mock/gomock"
 	peer "github.com/libp2p/go-libp2p-core/peer"
+	peer_mgr "github.com/meshplus/bitxhub-core/peer-mgr"
 	pb "github.com/meshplus/bitxhub-model/pb"
-	events "github.com/meshplus/bitxhub/internal/model/events"
 	peermgr "github.com/meshplus/bitxhub/pkg/peermgr"
 	network "github.com/meshplus/go-lightp2p"
-	reflect "reflect"
 )
 
 // MockPeerManager is a mock of PeerManager interface.
@@ -51,7 +52,7 @@ func (mr *MockPeerManagerMockRecorder) AddNode(newNodeID, vpInfo interface{}) *g
 }
 
 // AsyncSend mocks base method.
-func (m *MockPeerManager) AsyncSend(arg0 uint64, arg1 *pb.Message) error {
+func (m *MockPeerManager) AsyncSend(arg0 peer_mgr.KeyType, arg1 *pb.Message) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "AsyncSend", arg0, arg1)
 	ret0, _ := ret[0].(error)
@@ -116,6 +117,20 @@ func (mr *MockPeerManagerMockRecorder) Disconnect(vpInfos interface{}) *gomock.C
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Disconnect", reflect.TypeOf((*MockPeerManager)(nil).Disconnect), vpInfos)
 }
 
+// OrderPeers mocks base method.
+func (m *MockPeerManager) OrderPeers() map[uint64]*pb.VpInfo {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "OrderPeers")
+	ret0, _ := ret[0].(map[uint64]*pb.VpInfo)
+	return ret0
+}
+
+// OrderPeers indicates an expected call of OrderPeers.
+func (mr *MockPeerManagerMockRecorder) OrderPeers() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OrderPeers", reflect.TypeOf((*MockPeerManager)(nil).OrderPeers))
+}
+
 // OtherPeers mocks base method.
 func (m *MockPeerManager) OtherPeers() map[uint64]*peer.AddrInfo {
 	m.ctrl.T.Helper()
@@ -131,10 +146,10 @@ func (mr *MockPeerManagerMockRecorder) OtherPeers() *gomock.Call {
 }
 
 // Peers mocks base method.
-func (m *MockPeerManager) Peers() map[uint64]*pb.VpInfo {
+func (m *MockPeerManager) Peers() map[string]*peer.AddrInfo {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Peers")
-	ret0, _ := ret[0].(map[uint64]*pb.VpInfo)
+	ret0, _ := ret[0].(map[string]*peer.AddrInfo)
 	return ret0
 }
 
@@ -158,8 +173,22 @@ func (mr *MockPeerManagerMockRecorder) PierManager() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PierManager", reflect.TypeOf((*MockPeerManager)(nil).PierManager))
 }
 
+// ReConfig mocks base method.
+func (m *MockPeerManager) ReConfig(config interface{}) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReConfig", config)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ReConfig indicates an expected call of ReConfig.
+func (mr *MockPeerManagerMockRecorder) ReConfig(config interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReConfig", reflect.TypeOf((*MockPeerManager)(nil).ReConfig), config)
+}
+
 // Send mocks base method.
-func (m *MockPeerManager) Send(arg0 uint64, arg1 *pb.Message) (*pb.Message, error) {
+func (m *MockPeerManager) Send(arg0 peer_mgr.KeyType, arg1 *pb.Message) (*pb.Message, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Send", arg0, arg1)
 	ret0, _ := ret[0].(*pb.Message)
@@ -216,7 +245,7 @@ func (mr *MockPeerManagerMockRecorder) Stop() *gomock.Call {
 }
 
 // SubscribeOrderMessage mocks base method.
-func (m *MockPeerManager) SubscribeOrderMessage(ch chan<- events.OrderMessageEvent) event.Subscription {
+func (m *MockPeerManager) SubscribeOrderMessage(ch chan<- peer_mgr.OrderMessageEvent) event.Subscription {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SubscribeOrderMessage", ch)
 	ret0, _ := ret[0].(event.Subscription)

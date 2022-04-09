@@ -2,23 +2,26 @@ package router
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 
+	"github.com/cbergoon/merkletree"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/pb"
 	"github.com/meshplus/bitxhub/internal/ledger"
 	"github.com/meshplus/bitxhub/internal/repo"
 	"github.com/meshplus/bitxhub/pkg/peermgr"
-	"github.com/meshplus/bitxid"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/atomic"
 )
 
 var _ Router = (*InterchainRouter)(nil)
 
-const blockChanNumber = 1024
+const (
+	blockChanNumber = 1024
+)
 
 type InterchainRouter struct {
 	logger             logrus.FieldLogger
@@ -28,7 +31,7 @@ type InterchainRouter struct {
 	subscriptions      sync.Map
 	unionSubscriptions sync.Map
 	count              atomic.Int64
-	ledger             ledger.Ledger
+	ledger             *ledger.Ledger
 	peerMgr            peermgr.PeerManager
 	quorum             uint64
 
@@ -36,7 +39,7 @@ type InterchainRouter struct {
 	cancel context.CancelFunc
 }
 
-func New(logger logrus.FieldLogger, repo *repo.Repo, ledger ledger.Ledger, peerMgr peermgr.PeerManager, quorum uint64) (*InterchainRouter, error) {
+func New(logger logrus.FieldLogger, repo *repo.Repo, ledger *ledger.Ledger, peerMgr peermgr.PeerManager, quorum uint64) (*InterchainRouter, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &InterchainRouter{
@@ -63,37 +66,22 @@ func (router *InterchainRouter) Stop() error {
 	return nil
 }
 
-func (router *InterchainRouter) AddPier(key bitxid.DID, pierID string, isUnion bool) (chan *pb.InterchainTxWrappers, error) {
+func (router *InterchainRouter) AddPier(pierID string) (chan *pb.InterchainTxWrappers, error) {
 	c := make(chan *pb.InterchainTxWrappers, blockChanNumber)
-	if isUnion {
-		// todo(tyx): add access control for pier subscription
-		raw, _ := router.unionPiers.LoadOrStore(key, &event.Feed{})
-		//if !ok {
-		//	return nil, fmt.Errorf("did %s for subscription is not exist", key)
-		//}
-		subBus := raw.(*event.Feed)
-		sub := subBus.Subscribe(c)
-		router.unionSubscriptions.Store(pierID, sub)
-	} else {
-		raw, _ := router.piers.LoadOrStore(key, &event.Feed{})
-		//if !ok {
-		//	return nil, fmt.Errorf("did %s for subscription is not exist", key)
-		//}
-		subBus := raw.(*event.Feed)
-		sub := subBus.Subscribe(c)
-		router.subscriptions.Store(pierID, sub)
-	}
+	raw, _ := router.piers.LoadOrStore(pierID, &event.Feed{})
+	subBus := raw.(*event.Feed)
+	sub := subBus.Subscribe(c)
+	router.subscriptions.Store(pierID, sub)
 
 	router.count.Inc()
 	router.logger.WithFields(logrus.Fields{
-		"id":       key,
-		"is_union": isUnion,
+		"pierID": pierID,
 	}).Infof("Add pier")
 
 	return c, nil
 }
 
-func (router *InterchainRouter) RemovePier(key bitxid.DID, pierID string, isUnion bool) {
+func (router *InterchainRouter) RemovePier(pierID string) {
 	unsubscribeAndDel := func(r sync.Map) {
 		raw, ok := r.Load(pierID)
 		if !ok {
@@ -103,11 +91,7 @@ func (router *InterchainRouter) RemovePier(key bitxid.DID, pierID string, isUnio
 		sub.Unsubscribe()
 		r.Delete(pierID)
 	}
-	if isUnion {
-		unsubscribeAndDel(router.unionSubscriptions)
-	} else {
-		unsubscribeAndDel(router.subscriptions)
-	}
+	unsubscribeAndDel(router.subscriptions)
 
 	router.count.Dec()
 }
@@ -119,7 +103,7 @@ func (router *InterchainRouter) PutBlockAndMeta(block *pb.Block, meta *pb.Interc
 
 	ret := router.classify(block, meta)
 	router.piers.Range(func(k, value interface{}) bool {
-		key := k.(bitxid.DID)
+		key := k.(string)
 		w := value.(*event.Feed)
 		wrappers := make([]*pb.InterchainTxWrapper, 0)
 		_, ok := ret[key]
@@ -143,14 +127,6 @@ func (router *InterchainRouter) PutBlockAndMeta(block *pb.Block, meta *pb.Interc
 
 		return true
 	})
-
-	interchainTxWrappers := router.generateUnionInterchainTxWrappers(ret, block, meta)
-	router.unionPiers.Range(func(k, v interface{}) bool {
-		w := v.(*event.Feed)
-		w.Send(interchainTxWrappers)
-		return true
-	})
-
 }
 
 func (router *InterchainRouter) GetBlockHeader(begin, end uint64, ch chan<- *pb.BlockHeader) error {
@@ -169,10 +145,9 @@ func (router *InterchainRouter) GetBlockHeader(begin, end uint64, ch chan<- *pb.
 	return nil
 }
 
-func (router *InterchainRouter) GetInterchainTxWrappers(did string, begin, end uint64, ch chan<- *pb.InterchainTxWrappers) error {
+func (router *InterchainRouter) GetInterchainTxWrappers(appchainID string, begin, end uint64, ch chan<- *pb.InterchainTxWrappers) error {
 	defer close(ch)
 
-	chainDID := bitxid.DID(did)
 	for i := begin; i <= end; i++ {
 		block, err := router.ledger.GetBlock(i)
 		if err != nil {
@@ -186,28 +161,23 @@ func (router *InterchainRouter) GetInterchainTxWrappers(did string, begin, end u
 
 		ret := router.classify(block, meta)
 		wrappers := make([]*pb.InterchainTxWrapper, 0)
-		if ret[chainDID] != nil {
-			wrappers = append(wrappers, ret[chainDID])
+		if ret[appchainID] != nil {
+			wrappers = append(wrappers, ret[appchainID])
 			ch <- &pb.InterchainTxWrappers{
 				InterchainTxWrappers: wrappers,
 			}
 			continue
 		} else {
-			_, ok := router.unionPiers.Load(did)
-			if !ok {
-				// empty interchain tx in this block
-				emptyWrapper := &pb.InterchainTxWrapper{
-					Height:  block.Height(),
-					L2Roots: meta.L2Roots,
-				}
-				wrappers = append(wrappers, emptyWrapper)
-				ch <- &pb.InterchainTxWrappers{
-					InterchainTxWrappers: wrappers,
-				}
-				continue
+			// empty interchain tx in this block
+			emptyWrapper := &pb.InterchainTxWrapper{
+				Height:  block.Height(),
+				L2Roots: meta.L2Roots,
 			}
-
-			ch <- router.generateUnionInterchainTxWrappers(ret, block, meta)
+			wrappers = append(wrappers, emptyWrapper)
+			ch <- &pb.InterchainTxWrappers{
+				InterchainTxWrappers: wrappers,
+			}
+			continue
 		}
 
 	}
@@ -220,35 +190,75 @@ func (router *InterchainRouter) fetchSigns(height uint64) (map[string][]byte, er
 	return nil, nil
 }
 
-func (router *InterchainRouter) classify(block *pb.Block, meta *pb.InterchainMeta) map[bitxid.DID]*pb.InterchainTxWrapper {
-	txsM := make(map[bitxid.DID][]*pb.BxhTransaction)
-	hashesM := make(map[bitxid.DID][]types.Hash)
+func (router *InterchainRouter) classify(block *pb.Block, meta *pb.InterchainMeta) map[string]*pb.InterchainTxWrapper {
+	txsM := make(map[string][]*pb.VerifiedTx)
 
 	for k, vs := range meta.Counter {
-		var txs []*pb.BxhTransaction
-		var hashes []types.Hash
-		for _, i := range vs.Slice {
-			tx, _ := block.Transactions.Transactions[i].(*pb.BxhTransaction)
-			txs = append(txs, tx)
-			hashes = append(hashes, *block.Transactions.Transactions[i].GetHash())
+		var txs []*pb.VerifiedTx
+		for _, vi := range vs.Slice {
+			tx, _ := block.Transactions.Transactions[vi.Index].(*pb.BxhTransaction)
+			txs = append(txs, &pb.VerifiedTx{
+				Tx:    tx,
+				Valid: vi.Valid,
+			})
 		}
-		// k value is the destination did address, so did with same method
-		// will be grouped into one set
-		fullMethod := bitxid.DID(k).GetChainDID()
-		txsM[fullMethod] = txs
-		hashesM[fullMethod] = hashes
+		txsM[k] = txs
 	}
 
-	target := make(map[bitxid.DID]*pb.InterchainTxWrapper)
-	for dest, txs := range txsM {
+	target := make(map[string]*pb.InterchainTxWrapper)
+
+	for dest, list := range meta.TimeoutCounter {
 		wrapper := &pb.InterchainTxWrapper{
-			Height:            block.BlockHeader.Number,
-			TransactionHashes: hashesM[dest],
-			Transactions:      txs,
-			L2Roots:           meta.L2Roots,
+			Height:         block.BlockHeader.Number,
+			L2Roots:        meta.L2Roots,
+			TimeoutL2Roots: meta.TimeoutL2Roots,
+			TimeoutIbtps:   list.GetSlice(),
 		}
 		target[dest] = wrapper
 	}
 
+	for dest, list := range meta.MultiTxCounter {
+		if wrapper, has := target[dest]; has {
+			wrapper.MultiTxIbtps = list.GetSlice()
+			target[dest] = wrapper
+		} else {
+			wrapper := &pb.InterchainTxWrapper{
+				Height:       block.BlockHeader.Number,
+				L2Roots:      meta.L2Roots,
+				MultiTxIbtps: list.GetSlice(),
+			}
+			target[dest] = wrapper
+		}
+	}
+
+	for dest, txs := range txsM {
+		if wrapper, has := target[dest]; has {
+			wrapper.Transactions = txs
+			target[dest] = wrapper
+		} else {
+			wrapper := &pb.InterchainTxWrapper{
+				Height:       block.BlockHeader.Number,
+				Transactions: txs,
+				L2Roots:      meta.L2Roots,
+			}
+			target[dest] = wrapper
+		}
+	}
+
 	return target
+}
+
+func (router *InterchainRouter) calcTimeoutL2Root(list []string) (types.Hash, error) {
+	hashes := make([]merkletree.Content, 0, len(list))
+	for _, id := range list {
+		hash := sha256.Sum256([]byte(id))
+		hashes = append(hashes, types.NewHash(hash[:]))
+	}
+
+	tree, err := merkletree.NewTree(hashes)
+	if err != nil {
+		return types.Hash{}, fmt.Errorf("init merkle tree: %w", err)
+	}
+
+	return *types.NewHash(tree.MerkleRoot()), nil
 }

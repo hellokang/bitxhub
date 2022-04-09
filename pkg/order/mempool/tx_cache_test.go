@@ -1,6 +1,7 @@
 package mempool
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -14,7 +15,9 @@ func TestAppendTx(t *testing.T) {
 	logger := log.NewWithModule("consensus")
 	sliceTimeout := 1 * time.Millisecond
 	txCache := NewTxCache(sliceTimeout, 2, logger)
-	go txCache.ListenEvent()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go txCache.ListenEvent(ctx)
 
 	tx := &pb.BxhTransaction{}
 	txCache.appendTx(nil)
@@ -39,6 +42,4 @@ func TestAppendTx(t *testing.T) {
 		ast.Equal(2, len(txSet.Transactions), "post tx set by size")
 		ast.Equal(0, len(txCache.txSet))
 	}
-	// test exit txCache
-	close(txCache.close)
 }

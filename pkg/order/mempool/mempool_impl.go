@@ -24,6 +24,7 @@ type mempoolImpl struct {
 	txSliceSize uint64
 	batchSeqNo  uint64 // track the sequence number of block
 	poolSize    uint64
+	isTimed     bool
 	logger      logrus.FieldLogger
 	txStore     *transactionStore // store all transactions info
 	txFeed      event.Feed
@@ -35,6 +36,7 @@ func newMempoolImpl(config *Config) (*mempoolImpl, error) {
 		batchSeqNo:  config.ChainHeight,
 		logger:      config.Logger,
 		txSliceSize: config.TxSliceSize,
+		isTimed:     config.IsTimed,
 	}
 	mpi.txStore = newTransactionStore(config.GetAccountNonce, config.Logger)
 	if config.BatchSize == 0 {
@@ -93,8 +95,8 @@ func (mpi *mempoolImpl) ProcessTransactions(txs []pb.Transaction, isLeader, isLo
 	// send tx to mempool store
 	mpi.processDirtyAccount(dirtyAccounts)
 
-	// generator batch by block size
-	if isLeader && mpi.txStore.priorityNonBatchSize >= mpi.batchSize {
+	// if no timedBlock, generator batch by block size
+	if isLeader && mpi.txStore.priorityNonBatchSize >= mpi.batchSize && !mpi.isTimed {
 		batch, err := mpi.generateBlock()
 		if err != nil {
 			mpi.logger.Errorf("Generator batch failed")
@@ -191,7 +193,7 @@ func (mpi *mempoolImpl) generateBlock() (*raftproto.RequestBatch, error) {
 		return true
 	})
 
-	if len(result) == 0 && mpi.txStore.priorityNonBatchSize > 0 {
+	if !mpi.isTimed && len(result) == 0 && mpi.txStore.priorityNonBatchSize > 0 {
 		mpi.logger.Error("===== NOTE!!! Leader generate a batch with 0 txs")
 		mpi.txStore.priorityNonBatchSize = 0
 		return nil, nil
@@ -206,8 +208,9 @@ func (mpi *mempoolImpl) generateBlock() (*raftproto.RequestBatch, error) {
 	mpi.batchSeqNo++
 	batchSeqNo := mpi.batchSeqNo
 	batch := &raftproto.RequestBatch{
-		TxList: &pb.Transactions{Transactions: txList},
-		Height: batchSeqNo,
+		TxList:    &pb.Transactions{Transactions: txList},
+		Height:    batchSeqNo,
+		Timestamp: time.Now().UnixNano(),
 	}
 	if mpi.txStore.priorityNonBatchSize >= uint64(len(txList)) {
 		mpi.txStore.priorityNonBatchSize = mpi.txStore.priorityNonBatchSize - uint64(len(txList))
@@ -224,7 +227,6 @@ func (mpi *mempoolImpl) processCommitTransactions(state *ChainState) {
 	// update current cached commit nonce for account
 	for _, txHash := range state.TxHashList {
 		strHash := txHash.String()
-		txPointer := mpi.txStore.txHashMap[strHash]
 		txPointer, ok := mpi.txStore.txHashMap[strHash]
 		if !ok {
 			mpi.logger.Warningf("Remove transaction %s failed, Can't find it from txHashMap", strHash)
@@ -320,30 +322,28 @@ func (mpi *mempoolImpl) GetPendingTransactions(max int) []pb.Transaction {
 		max = int(mpi.txStore.priorityNonBatchSize)
 	}
 
-	// TODO
+	// TODO：Not implemented yet
 
 	return nil
 }
 
 func (mpi *mempoolImpl) GetTransaction(hash *types.Hash) pb.Transaction {
-	// TODO: make it go routine safe
-	//key, ok := mpi.txStore.txHashMap[hash.String()]
-	//if !ok {
-	//	return nil
-	//}
-	//
-	//txMap, ok := mpi.txStore.allTxs[key.account]
-	//if !ok {
-	//	return nil
-	//}
-	//
-	//item, ok := txMap.items[key.nonce]
-	//if !ok {
-	//	return nil
-	//}
+	key, ok := mpi.txStore.txHashMap[hash.String()]
+	if !ok {
+		return nil
+	}
 
-	//return item.tx
-	return nil
+	txMap, ok := mpi.txStore.allTxs[key.account]
+	if !ok {
+		return nil
+	}
+
+	item, ok := txMap.items[key.nonce]
+	if !ok {
+		return nil
+	}
+
+	return item.tx
 }
 
 func (mpi *mempoolImpl) shardTxList(timeoutItems []*orderedTimeoutKey, batchLen uint64) [][]pb.Transaction {

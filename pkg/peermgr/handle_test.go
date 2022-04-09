@@ -1,6 +1,7 @@
 package peermgr
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -8,30 +9,38 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	peer_mgr "github.com/meshplus/bitxhub-core/peer-mgr"
+
+	swarm "github.com/libp2p/go-libp2p-swarm"
 
 	"github.com/Rican7/retry"
 	"github.com/Rican7/retry/strategy"
 	"github.com/golang/mock/gomock"
 	crypto2 "github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/meshplus/bitxhub-core/governance"
+	node_mgr "github.com/meshplus/bitxhub-core/node-mgr"
 	"github.com/meshplus/bitxhub-kit/crypto"
 	"github.com/meshplus/bitxhub-kit/crypto/asym"
 	"github.com/meshplus/bitxhub-kit/crypto/asym/ecdsa"
 	"github.com/meshplus/bitxhub-kit/log"
+	"github.com/meshplus/bitxhub-kit/types"
+	"github.com/meshplus/bitxhub-model/constant"
 	"github.com/meshplus/bitxhub-model/pb"
-	"github.com/meshplus/bitxhub/internal/executor/contracts"
+	"github.com/meshplus/bitxhub/internal/ledger"
 	"github.com/meshplus/bitxhub/internal/ledger/mock_ledger"
 	"github.com/meshplus/bitxhub/internal/repo"
 	libp2pcert "github.com/meshplus/go-libp2p-cert"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func genKeysAndConfig(t *testing.T, peerCnt int) ([]crypto2.PrivKey, []crypto.PrivateKey, []string, []string) {
+func genKeysAndConfig(t *testing.T, peerCnt int) ([]crypto2.PrivKey, []crypto.PrivateKey, []string, []string, []string) {
 	var nodeKeys []crypto2.PrivKey
 	var privKeys []crypto.PrivateKey
 	var peers []string
-	var ids []string
+	var pids []string
+	var accounts []string
 
 	port := 5001
 
@@ -42,21 +51,25 @@ func genKeysAndConfig(t *testing.T, peerCnt int) ([]crypto2.PrivKey, []crypto.Pr
 		libp2pKey, err := convertToLibp2pPrivKey(key)
 		require.Nil(t, err)
 		nodeKeys = append(nodeKeys, libp2pKey)
-		id, err := peer.IDFromPublicKey(libp2pKey.GetPublic())
+		pid, err := peer.IDFromPublicKey(libp2pKey.GetPublic())
 		require.Nil(t, err)
 
 		peer := fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/", port)
 		peers = append(peers, peer)
-		ids = append(ids, id.String())
+		pids = append(pids, pid.String())
 		port++
 
 		privKey, err := asym.GenerateKeyPair(crypto.Secp256k1)
 		require.Nil(t, err)
 
 		privKeys = append(privKeys, privKey)
+
+		account, err := privKey.PublicKey().Address()
+		require.Nil(t, err)
+		accounts = append(accounts, account.String())
 	}
 
-	return nodeKeys, privKeys, peers, ids
+	return nodeKeys, privKeys, peers, pids, accounts
 }
 
 func convertToLibp2pPrivKey(privateKey crypto.PrivateKey) (crypto2.PrivKey, error) {
@@ -73,12 +86,12 @@ func convertToLibp2pPrivKey(privateKey crypto.PrivateKey) (crypto2.PrivKey, erro
 	return libp2pPrivKey, nil
 }
 
-func peers(id uint64, addrs []string, ids []string) []*repo.NetworkNodes {
+func peers(id uint64, addrs []string, ids []string, accounts []string) []*repo.NetworkNodes {
 	m := make([]*repo.NetworkNodes, 0, len(addrs))
 	for i, addr := range addrs {
 		m = append(m, &repo.NetworkNodes{
 			ID:      uint64(i + 1),
-			Account: "",
+			Account: accounts[i],
 			Pid:     ids[i],
 			Hosts:   []string{addr},
 		})
@@ -88,25 +101,61 @@ func peers(id uint64, addrs []string, ids []string) []*repo.NetworkNodes {
 
 func NewSwarms(t *testing.T, peerCnt int) []*Swarm {
 	var swarms []*Swarm
-	nodeKeys, privKeys, addrs, ids := genKeysAndConfig(t, peerCnt)
+	nodeKeys, privKeys, addrs, pids, accounts := genKeysAndConfig(t, peerCnt)
 	mockCtl := gomock.NewController(t)
-	mockLedger := mock_ledger.NewMockLedger(mockCtl)
+	chainLedger := mock_ledger.NewMockChainLedger(mockCtl)
+	stateLedger := mock_ledger.NewMockStateLedger(mockCtl)
+	mockLedger := &ledger.Ledger{
+		ChainLedger: chainLedger,
+		StateLedger: stateLedger,
+	}
 
-	mockLedger.EXPECT().GetBlock(gomock.Any()).Return(&pb.Block{
+	chainLedger.EXPECT().GetBlock(gomock.Any()).Return(&pb.Block{
 		BlockHeader: &pb.BlockHeader{
 			Number: 1,
 		},
 	}, nil).AnyTimes()
 
-	aer := contracts.AssetExchangeRecord{
-		Status: 0,
-	}
-
-	data, err := json.Marshal(aer)
+	ibtp := &pb.IBTP{}
+	tx := &pb.BxhTransaction{IBTP: ibtp}
+	chainLedger.EXPECT().GetBlockSign(gomock.Any()).Return([]byte("sign"), nil).AnyTimes()
+	chainLedger.EXPECT().GetTransaction(gomock.Any()).Return(tx, nil).AnyTimes()
+	hash, err := json.Marshal(tx.Hash())
 	require.Nil(t, err)
+	stateLedger.EXPECT().Copy().Return(stateLedger).AnyTimes()
+	stateLedger.EXPECT().GetState(gomock.Any(), gomock.Any()).DoAndReturn(func(addr *types.Address, key []byte) (bool, []byte) {
+		switch addr.String() {
+		case constant.InterchainContractAddr.Address().String():
+			return true, hash
+		case constant.TransactionMgrContractAddr.Address().String():
+			record := pb.TransactionRecord{
+				Status: pb.TransactionStatus_SUCCESS,
+			}
+			data, err := json.Marshal(record)
+			require.Nil(t, err)
+			return true, data
+		case constant.NodeManagerContractAddr.Address().String():
+			for i := 0; i < peerCnt; i++ {
+				node := &node_mgr.Node{
+					Account:  accounts[i],
+					VPNodeId: uint64(i),
+					Pid:      pids[i],
+					Status:   governance.GovernanceAvailable,
+				}
+				nodeData, err := json.Marshal(node)
+				require.Nil(t, err)
+				if bytes.Equal(key, []byte(node_mgr.NodeKey(accounts[i]))) {
+					return true, nodeData
+				}
+				if bytes.Equal(key, []byte(node_mgr.VpNodePidKey(pids[i]))) {
+					return true, []byte(accounts[i])
+				}
+			}
+			return false, []byte(fmt.Sprintf("error, key: %s", string(key)))
+		}
 
-	mockLedger.EXPECT().GetBlockSign(gomock.Any()).Return([]byte("sign"), nil).AnyTimes()
-	mockLedger.EXPECT().GetState(gomock.Any(), gomock.Any()).Return(true, data).AnyTimes()
+		return false, nil
+	}).AnyTimes()
 
 	agencyData, err := ioutil.ReadFile("testdata/agency.cert")
 	require.Nil(t, err)
@@ -146,12 +195,13 @@ func NewSwarms(t *testing.T, peerCnt int) []*Swarm {
 		repo.NetworkConfig.LocalAddr = local
 		repo.Key.Libp2pPrivKey = nodeKeys[i]
 		repo.Key.PrivKey = privKeys[i]
-		repo.NetworkConfig.Nodes = peers(uint64(i), addrs, ids)
+		repo.NetworkConfig.Nodes = peers(uint64(i), addrs, pids, accounts)
 
 		swarm, err := New(repo, log.NewWithModule(fmt.Sprintf("swarm%d", i)), mockLedger)
 		require.Nil(t, err)
 		err = swarm.Start()
 		require.Nil(t, err)
+
 		swarms = append(swarms, swarm)
 	}
 	return swarms
@@ -171,10 +221,10 @@ func TestSwarm_GetBlockPack(t *testing.T) {
 		Data: []byte("aaa"),
 	}
 	var err error
-	_, err = swarms[0].Send(2, msg)
+	_, err = swarms[0].Send(uint64(2), msg)
 	require.NotNil(t, err)
 	msg.Type = 100
-	_, err = swarms[0].Send(2, msg)
+	_, err = swarms[0].Send(uint64(2), msg)
 	require.NotNil(t, err)
 	for i := 0; i < len(swarms); i++ {
 		err = swarms[i].Stop()
@@ -205,7 +255,7 @@ func TestSwarm_FetchCert(t *testing.T) {
 	var res *pb.Message
 	var err error
 	err = retry.Retry(func(attempt uint) error {
-		res, err = swarms[0].Send(2, msg)
+		res, err = swarms[0].Send(uint64(2), msg)
 		if err != nil {
 			swarms[0].logger.Errorf(err.Error())
 			return err
@@ -214,6 +264,68 @@ func TestSwarm_FetchCert(t *testing.T) {
 	}, strategy.Wait(50*time.Millisecond))
 	require.Nil(t, err)
 	require.Equal(t, pb.Message_FETCH_CERT_ACK, res.Type)
+}
+
+func TestSwarm_FetchIBTPSigns(t *testing.T) {
+	peerCnt := 4
+	swarms := NewSwarms(t, peerCnt)
+	defer stopSwarms(t, swarms)
+
+	for swarms[0].CountConnectedPeers() != 3 {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	msg := &pb.Message{
+		Type: pb.Message_FETCH_IBTP_REQUEST_SIGN,
+	}
+	var res *pb.Message
+	var err error
+	err = retry.Retry(func(attempt uint) error {
+		res, err = swarms[0].Send(uint64(2), msg)
+		if err != nil {
+			swarms[0].logger.Errorf(err.Error())
+			return err
+		}
+		return nil
+	}, strategy.Wait(50*time.Millisecond))
+	require.Nil(t, err)
+	require.Equal(t, pb.Message_FETCH_IBTP_SIGN_ACK, res.Type)
+
+	msg = &pb.Message{
+		Type: pb.Message_FETCH_IBTP_RESPONSE_SIGN,
+	}
+	err = retry.Retry(func(attempt uint) error {
+		res, err = swarms[0].Send(uint64(3), msg)
+		if err != nil {
+			swarms[0].logger.Errorf(err.Error())
+			return err
+		}
+		return nil
+	}, strategy.Wait(50*time.Millisecond))
+	require.Nil(t, err)
+	require.Equal(t, pb.Message_FETCH_IBTP_SIGN_ACK, res.Type)
+}
+
+func TestSwarm_Gater(t *testing.T) {
+	peerCnt := 4
+	swarms := NewSwarms(t, peerCnt)
+	defer stopSwarms(t, swarms)
+
+	for swarms[0].CountConnectedPeers() != 3 {
+		time.Sleep(100 * time.Millisecond)
+	}
+	gater := newConnectionGater(swarms[0].logger, swarms[0].ledger)
+	require.True(t, gater.InterceptPeerDial(peer.ID("1")))
+	require.True(t, gater.InterceptAddrDial("1", swarms[1].multiAddrs[1].Addrs[0]))
+	require.True(t, gater.InterceptAccept(new(swarm.Conn)))
+
+	n := newNotifiee(swarms[0].routers, swarms[0].logger)
+	n.Listen(&swarm.Swarm{}, swarms[1].multiAddrs[1].Addrs[0])
+	n.ListenClose(&swarm.Swarm{}, swarms[1].multiAddrs[1].Addrs[0])
+	n.Disconnected(&swarm.Swarm{}, new(swarm.Conn))
+	n.OpenedStream(&swarm.Swarm{}, &swarm.Stream{})
+	n.ClosedStream(&swarm.Swarm{}, &swarm.Stream{})
+
 }
 
 func TestSwarm_CheckMasterPier(t *testing.T) {
@@ -229,7 +341,7 @@ func TestSwarm_CheckMasterPier(t *testing.T) {
 		Type: pb.Message_CHECK_MASTER_PIER,
 		Data: []byte("0x111111122222222333333333"),
 	}
-	res, err := swarms[0].Send(2, msg)
+	res, err := swarms[0].Send(uint64(2), msg)
 	require.NotNil(t, err)
 	require.Contains(t, err.Error(), "wait msg timeout")
 	require.Nil(t, res)
@@ -245,9 +357,10 @@ func TestSwarm_CheckMasterPier(t *testing.T) {
 	swarms[0].piers.pierChan.newChan(pierName)
 	swarms[1].piers = piers2
 	msg.Data = []byte(pierName)
-	swarms[0].Send(2, msg)
+	swarms[0].Send(uint64(2), msg)
 	time.Sleep(500 * time.Millisecond)
 	require.NotNil(t, swarms[0].piers.pierChan.checkAddress(pierName))
+
 }
 
 func TestSwarm_Send(t *testing.T) {
@@ -266,7 +379,7 @@ func TestSwarm_Send(t *testing.T) {
 	var res *pb.Message
 	var err error
 	err = retry.Retry(func(attempt uint) error {
-		res, err = swarms[0].Send(2, msg)
+		res, err = swarms[0].Send(uint64(2), msg)
 		if err != nil {
 			swarms[0].logger.Errorf(err.Error())
 			return err
@@ -292,7 +405,7 @@ func TestSwarm_Send(t *testing.T) {
 		Data: data,
 	}
 	err = retry.Retry(func(attempt uint) error {
-		res, err = swarms[2].Send(1, fetchBlocksMsg)
+		res, err = swarms[2].Send(uint64(1), fetchBlocksMsg)
 		if err != nil {
 			swarms[2].logger.Errorf(err.Error())
 			return err
@@ -318,7 +431,7 @@ func TestSwarm_Send(t *testing.T) {
 		Data: data,
 	}
 	err = retry.Retry(func(attempt uint) error {
-		res, err = swarms[2].Send(4, fetchBlockHeadersMsg)
+		res, err = swarms[2].Send(uint64(4), fetchBlockHeadersMsg)
 		if err != nil {
 			swarms[2].logger.Errorf(err.Error())
 			return err
@@ -339,7 +452,7 @@ func TestSwarm_Send(t *testing.T) {
 	}
 
 	err = retry.Retry(func(attempt uint) error {
-		res, err = swarms[1].Send(3, fetchBlockSignMsg)
+		res, err = swarms[1].Send(uint64(3), fetchBlockSignMsg)
 		if err != nil {
 			swarms[1].logger.Errorf(err.Error())
 			return err
@@ -349,69 +462,35 @@ func TestSwarm_Send(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, pb.Message_FETCH_BLOCK_SIGN_ACK, res.Type)
 	require.NotNil(t, res.Data)
-
-	fetchAESMsg := &pb.Message{
-		Type: pb.Message_FETCH_ASSET_EXCHANEG_SIGN,
-		Data: []byte("1"),
-	}
-
-	err = retry.Retry(func(attempt uint) error {
-		res, err = swarms[2].Send(4, fetchAESMsg)
-		if err != nil {
-			swarms[2].logger.Errorf(err.Error())
-			return err
-		}
-		return nil
-	}, strategy.Wait(50*time.Millisecond))
-	require.Nil(t, err)
-	require.Equal(t, pb.Message_FETCH_ASSET_EXCHANGE_SIGN_ACK, res.Type)
-	require.NotNil(t, res.Data)
-
-	fetchIBTPSignMsg := &pb.Message{
-		Type: pb.Message_FETCH_IBTP_SIGN,
-		Data: []byte("1"),
-	}
-
-	err = retry.Retry(func(attempt uint) error {
-		res, err = swarms[3].Send(1, fetchIBTPSignMsg)
-		if err != nil {
-			swarms[1].logger.Errorf(err.Error())
-			return err
-		}
-		return nil
-	}, strategy.Wait(50*time.Millisecond))
-	require.Nil(t, err)
-	require.Equal(t, pb.Message_FETCH_IBTP_SIGN_ACK, res.Type)
-	require.NotNil(t, res.Data)
 }
 
-//func TestSwarm_AsyncSend(t *testing.T) {
-//	peerCnt := 4
-//	swarms := NewSwarms(t, peerCnt)
-//
-//	for swarms[0].CountConnectedPeers() != 3 {
-//		time.Sleep(100 * time.Millisecond)
-//	}
-//
-//	orderMsgCh := make(chan events.OrderMessageEvent)
-//	orderMsgSub := swarms[2].SubscribeOrderMessage(orderMsgCh)
-//
-//	defer orderMsgSub.Unsubscribe()
-//
-//	msg := &pb.Message{
-//		Type: pb.Message_CONSENSUS,
-//		Data: []byte("1"),
-//	}
-//	var err error
-//	err = retry.Retry(func(attempt uint) error {
-//		err = swarms[0].AsyncSend(3, msg)
-//		if err != nil {
-//			swarms[0].logger.Errorf(err.Error())
-//			return err
-//		}
-//		return nil
-//	}, strategy.Wait(50*time.Millisecond))
-//	require.Nil(t, err)
-//
-//	require.NotNil(t, <-orderMsgCh)
-//}
+func TestSwarm_AsyncSend(t *testing.T) {
+	peerCnt := 4
+	swarms := NewSwarms(t, peerCnt)
+
+	for swarms[0].CountConnectedPeers() != 3 {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	orderMsgCh := make(chan peer_mgr.OrderMessageEvent)
+	orderMsgSub := swarms[2].SubscribeOrderMessage(orderMsgCh)
+
+	defer orderMsgSub.Unsubscribe()
+
+	msg := &pb.Message{
+		Type: pb.Message_CONSENSUS,
+		Data: []byte("1"),
+	}
+	var err error
+	err = retry.Retry(func(attempt uint) error {
+		err = swarms[0].AsyncSend(uint64(3), msg)
+		if err != nil {
+			swarms[0].logger.Errorf(err.Error())
+			return err
+		}
+		return nil
+	}, strategy.Wait(50*time.Millisecond))
+	require.Nil(t, err)
+
+	require.NotNil(t, <-orderMsgCh)
+}

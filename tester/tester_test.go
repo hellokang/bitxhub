@@ -5,13 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/meshplus/bitxhub-kit/crypto/asym"
-	"github.com/meshplus/bitxhub-model/constant"
-	"github.com/meshplus/bitxhub-model/pb"
+	"github.com/meshplus/bitxhub-core/order"
 	"github.com/meshplus/bitxhub/api/jsonrpc"
 	"github.com/meshplus/bitxhub/internal/app"
 	"github.com/meshplus/bitxhub/internal/coreapi"
@@ -19,7 +16,6 @@ import (
 	"github.com/meshplus/bitxhub/internal/loggers"
 	"github.com/meshplus/bitxhub/internal/repo"
 	"github.com/meshplus/bitxhub/internal/router"
-	"github.com/meshplus/bitxhub/pkg/order"
 	"github.com/meshplus/bitxhub/pkg/order/etcdraft"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -43,71 +39,15 @@ func TestTester(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	keyPath1 := filepath.Join("./test_data/config/node1/key.json")
-	priAdmin1, err := asym.RestorePrivateKey(keyPath1, "bitxhub")
-	require.Nil(t, err)
-	fromAdmin1, err := priAdmin1.PublicKey().Address()
-	require.Nil(t, err)
-	adminNonce1 := node1.Broker().GetPendingNonceByAccount(fromAdmin1.String())
-	require.Nil(t, err)
-	keyPath2 := filepath.Join("./test_data/config/node2/key.json")
-	priAdmin2, err := asym.RestorePrivateKey(keyPath2, "bitxhub")
-	require.Nil(t, err)
-	fromAdmin2, err := priAdmin2.PublicKey().Address()
-	require.Nil(t, err)
-	keyPath3 := filepath.Join("./test_data/config/node3/key.json")
-	priAdmin3, err := asym.RestorePrivateKey(keyPath3, "bitxhub")
-	require.Nil(t, err)
-	fromAdmin3, err := priAdmin3.PublicKey().Address()
-	require.Nil(t, err)
-	keyPath4 := filepath.Join("./test_data/config/node4/key.json")
-	priAdmin4, err := asym.RestorePrivateKey(keyPath4, "bitxhub")
-	require.Nil(t, err)
-	fromAdmin4, err := priAdmin4.PublicKey().Address()
-	require.Nil(t, err)
-	// init registry first
-	adminDid := genUniqueRelaychainDID(fromAdmin1.String())
-	args := []*pb.Arg{
-		pb.String(adminDid),
-	}
-	ret, err := invokeBVMContract(node1, priAdmin1, adminNonce1, constant.MethodRegistryContractAddr.Address(), "Init", args...)
-	require.Nil(t, err)
-	require.True(t, ret.IsSuccess(), string(ret.Ret))
-	adminNonce1++
-	// set admin for method registry for other nodes
-	args = []*pb.Arg{
-		pb.String(adminDid),
-		pb.String(genUniqueRelaychainDID(fromAdmin2.String())),
-	}
-	ret, err = invokeBVMContract(node1, priAdmin1, adminNonce1, constant.MethodRegistryContractAddr.Address(), "AddAdmin", args...)
-	require.Nil(t, err)
-	require.True(t, ret.IsSuccess(), string(ret.Ret))
-	adminNonce1++
-
-	args = []*pb.Arg{
-		pb.String(adminDid),
-		pb.String(genUniqueRelaychainDID(fromAdmin3.String())),
-	}
-	ret, err = invokeBVMContract(node1, priAdmin1, adminNonce1, constant.MethodRegistryContractAddr.Address(), "AddAdmin", args...)
-	require.Nil(t, err)
-	require.True(t, ret.IsSuccess(), string(ret.Ret))
-	adminNonce1++
-
-	args = []*pb.Arg{
-		pb.String(adminDid),
-		pb.String(genUniqueRelaychainDID(fromAdmin4.String())),
-	}
-	ret, err = invokeBVMContract(node1, priAdmin1, adminNonce1, constant.MethodRegistryContractAddr.Address(), "AddAdmin", args...)
-	require.Nil(t, err)
-	require.True(t, ret.IsSuccess(), string(ret.Ret))
-	adminNonce1++
-
 	suite.Run(t, &API{api: node1})
 	suite.Run(t, &RegisterAppchain{api: node2})
 	suite.Run(t, &Interchain{api: node3})
-	suite.Run(t, &Role{api: node4})
 	suite.Run(t, &Store{api: node1})
 	suite.Run(t, &Governance{api: node2})
+	suite.Run(t, &Role{api: node4})
+	suite.Run(t, &Rule{api: node3})
+	suite.Run(t, &Service{api: node4})
+	//suite.Run(t, &AuditAPI{api: node2})
 }
 
 func setupNode(t *testing.T, path string) api.CoreAPI {
@@ -115,7 +55,7 @@ func setupNode(t *testing.T, path string) api.CoreAPI {
 	repoRoot, err := repo.PathRootWithDefault(path)
 	require.Nil(t, err)
 
-	repo, err := repo.Load(repoRoot)
+	repo, err := repo.Load(repoRoot, "", "", "")
 	require.Nil(t, err)
 
 	loggers.Initialize(repo.Config)
@@ -156,7 +96,6 @@ func newTesterBitXHub(rep *repo.Repo) (*app.BitXHub, error) {
 	order, err := etcdraft.NewNode(
 		order.WithRepoRoot(repoRoot),
 		order.WithStoragePath(repo.GetStoragePath(repoRoot, "order")),
-		order.WithPluginPath(rep.Config.Plugin),
 		order.WithNodes(m),
 		order.WithID(rep.NetworkConfig.ID),
 		order.WithIsNew(rep.NetworkConfig.New),

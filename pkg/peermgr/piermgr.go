@@ -29,7 +29,7 @@ func (swarm *Swarm) AskPierMaster(address string) (bool, error) {
 
 	ch := swarm.piers.pierChan.newChan(address)
 
-	for id := range swarm.Peers() {
+	for id := range swarm.OrderPeers() {
 		if err := swarm.AsyncSend(id, message); err != nil {
 			swarm.logger.Debugf("send tx to:%d %s", id, err.Error())
 			continue
@@ -49,11 +49,6 @@ func (swarm *Swarm) AskPierMaster(address string) (bool, error) {
 				swarm.piers.pierChan.closeChan(address)
 				cancel()
 				return true, nil
-			}
-			if resp.Status == pb.CheckPierResponse_NO_MASTER {
-				swarm.piers.pierChan.closeChan(address)
-				cancel()
-				return false, nil
 			}
 		case <-ctx.Done():
 			// swarm.logger.Infoln("timeout!")
@@ -152,6 +147,13 @@ func (pm *pierMap) setMaster(address string, index string, timeout int64) error 
 		timeout:    timeout,
 	}
 	return nil
+}
+
+func (pm *pierMap) rmMaster(address string) {
+	pm.Lock()
+	defer pm.Unlock()
+
+	delete(pm.statusMap, address)
 }
 
 func (pm *pierMap) heartBeat(address string, index string) error {

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/meshplus/bitxhub-kit/crypto"
-	"github.com/meshplus/bitxhub-kit/crypto/asym"
 	"github.com/meshplus/bitxhub-kit/types"
 	"github.com/meshplus/bitxhub-model/pb"
 	"google.golang.org/grpc/codes"
@@ -33,9 +31,34 @@ func (cbs *ChainBrokerService) SendTransaction(ctx context.Context, tx *pb.BxhTr
 	return &pb.TransactionHashMsg{TxHash: hash}, nil
 }
 
+func (cbs *ChainBrokerService) SendTransactions(ctx context.Context, txs *pb.MultiTransaction) (*pb.MultiTransactionHash, error) {
+	err := cbs.api.Broker().OrderReady()
+	if err != nil {
+		return nil, status.Newf(codes.Internal, "the system is temporarily unavailable %s", err.Error()).Err()
+	}
+	hashList := make([]*pb.TransactionHashMsg, 0, len(txs.Txs))
+	for _, tx := range txs.Txs {
+		if err := cbs.checkTransaction(tx); err != nil {
+			cbs.logger.Errorf("api checkTransaction err: nonce is %d", tx.GetNonce())
+			return nil, status.Newf(codes.InvalidArgument, "check transaction fail for %s", err.Error()).Err()
+		}
+
+		hash, err := cbs.sendTransaction(tx)
+		if tx.IsIBTP() {
+			cbs.logger.Infof("get transaction:appchain is %s, nonce is %d, index is %d", tx.GetFrom().String(), tx.GetNonce(), tx.GetIBTP().Index)
+		}
+		if err != nil {
+			return nil, status.Newf(codes.Internal, "internal handling transaction fail %s", err.Error()).Err()
+		}
+		hashList = append(hashList, &pb.TransactionHashMsg{TxHash: hash})
+	}
+
+	return &pb.MultiTransactionHash{TxHashList: hashList}, nil
+}
+
 func (cbs *ChainBrokerService) SendView(_ context.Context, tx *pb.BxhTransaction) (*pb.Receipt, error) {
 	if err := cbs.checkTransaction(tx); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("check transaction %s failed: %w", tx.GetHash().String(), err)
 	}
 
 	result, err := cbs.sendView(tx)
@@ -48,7 +71,7 @@ func (cbs *ChainBrokerService) SendView(_ context.Context, tx *pb.BxhTransaction
 
 func (cbs *ChainBrokerService) checkTransaction(tx *pb.BxhTransaction) error {
 	if tx.Payload == nil && tx.IBTP == nil {
-		return fmt.Errorf("tx payload and ibtp can't both be nil")
+		tx.Payload = []byte{}
 	}
 	if tx.From == nil {
 		return fmt.Errorf("tx from address is nil")
@@ -79,27 +102,28 @@ func (cbs *ChainBrokerService) checkTransaction(tx *pb.BxhTransaction) error {
 		return fmt.Errorf("signature can't be empty")
 	}
 
+	if err := tx.VerifySignature(); err != nil {
+		return fmt.Errorf("invalid signature: %w", err)
+	}
+
+	tx.TransactionHash = tx.Hash()
+
 	return nil
 }
 
 func (cbs *ChainBrokerService) sendTransaction(tx *pb.BxhTransaction) (string, error) {
-	tx.TransactionHash = tx.Hash()
-	ok, _ := asym.Verify(crypto.Secp256k1, tx.Signature, tx.SignHash().Bytes(), *tx.From)
-	if !ok {
-		return "", fmt.Errorf("invalid signature")
-	}
 	err := cbs.api.Broker().HandleTransaction(tx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("handle transaction %s failed: %w", tx.GetHash().String(), err)
 	}
 
-	return tx.TransactionHash.String(), nil
+	return tx.GetHash().String(), nil
 }
 
 func (cbs *ChainBrokerService) sendView(tx *pb.BxhTransaction) (*pb.Receipt, error) {
 	result, err := cbs.api.Broker().HandleView(tx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("handle read-only transaction %s failed: %w", tx.GetHash().String(), err)
 	}
 
 	return result, nil
@@ -112,7 +136,7 @@ func (cbs *ChainBrokerService) GetTransaction(ctx context.Context, req *pb.Trans
 	}
 	tx, err := cbs.api.Broker().GetTransaction(hash)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get transaction %s failed: %w", hash.String(), err)
 	}
 
 	bxhTx, ok := tx.(*pb.BxhTransaction)
@@ -122,11 +146,31 @@ func (cbs *ChainBrokerService) GetTransaction(ctx context.Context, req *pb.Trans
 
 	meta, err := cbs.api.Broker().GetTransactionMeta(hash)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get transaction %s meta failed: %w", tx.GetHash().Hash, err)
 	}
 
 	return &pb.GetTransactionResponse{
 		Tx:     bxhTx,
 		TxMeta: meta,
+	}, nil
+}
+
+func (cbs *ChainBrokerService) GetPendingTransaction(ctx context.Context, req *pb.TransactionHashMsg) (*pb.GetTransactionResponse, error) {
+	hash := types.NewHashByStr(req.TxHash)
+	if hash == nil {
+		return nil, fmt.Errorf("invalid format of tx hash for querying transaction")
+	}
+	tx := cbs.api.Broker().GetPoolTransaction(hash)
+
+	if tx == nil {
+		return nil, fmt.Errorf("tx:%s not in mempool", hash.String())
+	}
+	bxhTx, ok := tx.(*pb.BxhTransaction)
+	if !ok {
+		return nil, fmt.Errorf("cannot get non bxh tx via grpc")
+	}
+
+	return &pb.GetTransactionResponse{
+		Tx: bxhTx,
 	}, nil
 }

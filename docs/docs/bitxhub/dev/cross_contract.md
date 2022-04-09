@@ -4,58 +4,65 @@
 
 跨链接入方无需对broker合约进行修改，直接部署使用即可；同时为了简化业务合约的编写，我们设计了业务合约的相应接口。
 
+以下以以太坊上的solidity合约为例。
+
 ## Broker 合约接口
 
-```go
-type Broker interface {
+```solidity
   // 提供给业务合约注册。注册且审核通过的业务合约才能调用Broker合约的跨链接口
-  register(string id) Response
+  function register(string addr) public
 
   // 提供给管理员审核已经注册的业务合约
-  audit(string id, bool status) Response
+  function audit(string addr, bool status) public returns(bool)
 
-  // getInnerMeta 是获取跨链请求相关的Meta信息的接口。以Broker所在的区块链为目的链的一系列跨链请求的序号信息。如果Broker在A链，则可能有多条链和A进行跨链，如B->A:3; C->A:5。返回的map中，key值为来源链ID，value对应该来源链已发送的最新的跨链请求的序号，如{B:3, C:5}。
-  getInnerMeta() Response
+  // getInnerMeta 是获取跨链请求相关的Meta信息的接口。以Broker所在的区块链为目的链的一系列跨链请求的序号信息。
+  // 如果Broker在A链，则可能有多条链和A进行跨链，如B->A:3; C->A:5。
+  // 返回的map中，key值为来源链ID，value对应该来源链已发送的最新的跨链请求的序号，如{B:3, C:5}。
+  function getInnerMeta() public view returns(address[] memory, uint64[] memory)
 
-  // getOuterMeta 是获取跨链请求相关的Meta信息的接口。以Broker所在的区块链为来源链的一系列跨链请求的序号信息。如果以Broker在A链，则A可能和多条链进行跨链，如A->B:3; A->C:5。返回的map中，key值为目的链ID，value对应已发送到该目的链的最新跨链请求的序号，如{B:3, C:5}。
-  getOuterMeta() Response
+  // getOuterMeta 是获取跨链请求相关的Meta信息的接口。以Broker所在的区块链为来源链的一系列跨链请求的序号信息。
+  // 如果以Broker在A链，则A可能和多条链进行跨链，如A->B:3; A->C:5。
+  // 返回的map中，key值为目的链ID，value对应已发送到该目的链的最新跨链请求的序号，如{B:3, C:5}。
+  function getOuterMeta() public view returns(address[] memory, uint64[] memory)
 
-  // getCallbackMeta 是获取跨链请求相关的Meta信息的接口。以Broker所在的区块链为来源链的一系列跨链请求的序号信息。如果Broker在A链，则A可能和多条链进行跨链，如A->B:3; A->C:5；同时由于跨链请求中支持回调操作，即A->B->A为一次完整的跨链操作，我们需要记录回调请求的序号信息，如A->B->:2; A->C—>A:4。返回的map中，key值为目的链ID，value对应到该目的链最新的带回调跨链请求的序号，如{B:2, C:4}。（注意 callbackMeta序号可能和outMeta是不一致的，这是由于由A发出的跨链请求部分是没有回调的）
-  getCallbackMeta() Response
+  // getCallbackMeta 是获取跨链请求相关的Meta信息的接口。以Broker所在的区块链为来源链的一系列跨链请求的序号信息。
+  // 如果Broker在A链，则A可能和多条链进行跨链，如A->B:3; A->C:5；同时由于跨链请求中支持回调操作，即A->B->A为一次完整的跨链操作，
+  // 我们需要记录回调请求的序号信息，如A->B->:2; A->C—>A:4。返回的map中，key值为目的链ID，value对应到该目的链最新的带回调跨链请求的序号，
+  // 如{B:2, C:4}。（注意 callbackMeta序号可能和outMeta是不一致的，这是由于由A发出的跨链请求部分是没有回调的）
+  function getCallbackMeta() public view returns(address[] memory, uint64[] memory)
 
-  // getInMessage 查询历史跨链请求。查询键值中srcChainID指定来源链，idx指定序号，查询结果为以Broker所在的区块链作为目的链的跨链请求。
-  getInMessage(string srcChainID, uint64 idx) Response
+  // getInMessage 查询历史跨链请求所在的区块高度。查询键值中srcChainID指定来源链，idx指定序号，查询结果为以Broker所在的区块链作为目的链的跨链请求所在的区块高度。
+  function getInMessage(string srcChainID, uint64 idx) public view returns (uint)
 
-  // getOutMessage 查询历史跨链请求。查询键值中dstChainID指定目的链，idx指定序号，查询结果为以Broker所在的区块链作为来源链的跨链请求。
-  getOutMessage(string dstChainID, uint64 idx) Response
+  // getOutMessage 查询历史跨链请求所在的区块高度。查询键值中dstChainID指定目的链，idx指定序号，查询结果为以Broker所在的区块链作为来源链的跨链请求所在的区块高度。
+  function getOutMessage(string dstChainID, uint64 idx) public view returns (uint)
 
   // 提供给跨链网关调用的接口，跨链网关收到跨链请求时会调用该接口。
-  invokeInterchain(address srcChainID, uint64 index, address destAddr, bool req, bytes calldata bizCallData)
+  function invokeInterchain(address srcChainID, uint64 index, address destAddr, bool req, bytes calldata bizCallData) payable external
   	
   // 提供给跨链网关调用的接口，当跨链网关收到无效当跨链请求时会调用该接口。
-  invokeIndexUpdateWithError(address srcChainID, uint64 index, bool req, string memory err)
+  function invokeIndexUpdateWithError(address srcChainID, uint64 index, bool req, string memory err) public
 
   // 提供给业务合约发起通用的跨链交易的接口。
-  emitInterchainEvent(address destChainID, string memory destAddr, string memory funcs, string memory args, string memory argscb, string memory argsrb)
+  function emitInterchainEvent(address destChainID, string memory destAddr, string memory funcs, string memory args, string memory argscb, string memory argsrb) public onlyWhiteList
 
   // 提供给合约部署初始化使用
-  initialize() Response
-}
+  function initialize() public
 ```
 
 ### 重要接口说明
 
 - `emitInterchainEvent` 
 
-该接口是业务合约发起通用的跨链调用的接口。接受的参数有：目的链ID，目的链业务合约地址或ID，调用的函数名、回调函数名、回滚函数名，调用函数的参数，回调函数参数，回滚函数参数。
+该接口是业务合约发起通用的跨链调用的接口。接收的参数有：目的链ID，目的链业务合约地址或ID，调用的函数名、回调函数名、回滚函数名，调用函数的参数，回调函数的参数，回滚函数的参数。
 
-Broker会记录跨链交易相应的元信息，并对跨链交易进行编号，保证跨链交易有序进行。并且抛出跨链事件，以通知跨链网关跨链交易的产生。
+Broker会记录跨链交易相应的元信息，对跨链交易进行编号，保证跨链交易有序进行, 并且抛出跨链事件，以通知跨链网关跨链交易的产生。
 
 - `invokeInterchain` 
 
-该接口是跨链网关对业务合约进行跨链调用或回调/回滚的接口。跨链网关对要调用的目的合约的方法和参数进行封装，通过该接口实现对不同目的合约的灵活调用，并返回目的合约的调用函数的返回值。
-接受参数有：来源链ID，交易序号，目的业务合约ID，是否是跨链请求，业务合约调用方法和参数的封装数据。
+该接口是跨链网关对业务合约进行跨链调用或回调/回滚的接口。 接收参数有：来源链ID，交易序号，目的业务合约ID，是否是跨链请求，业务合约调用方法和参数的封装数据。
 
+跨链网关对要调用的目的合约的方法和参数进行封装，通过该接口实现对不同目的合约的灵活调用，并返回目的合约的调用函数的返回值。
 
 ## 业务合约接口
 
@@ -63,38 +70,35 @@ Broker会记录跨链交易相应的元信息，并对跨链交易进行编号�
 
 ### Transfer 合约
 
-```go
-type Transfer interface {
+```solidity
   // 发起一笔跨链交易的接口
-  transfer(string dstChainID, string destAddr, string sender, string receiver, string amount) Response
+  function transfer(string dstChainID, string destAddr, string sender, string receiver, string amount) public
 
   // 提供给Broker合约收到跨链充值所调用的接口
-  interchainCharge(string sender, string receiver, uint64 val) Response
+  function interchainCharge(string sender, string receiver, uint64 val) public onlyBroker returns(bool)
 
   // 跨链交易失败之后，提供给Broker合约进行回滚的接口
-  interchainRollback(string sender, uint64 val) Response
+  function interchainRollback(string sender, uint64 val) public onlyBroker
 
-  // 冻结账户操作
-  frozenAccount(string account) Response
+  // 获取transfer合约中某个账户的余额
+  function getBalance(string id) public view returns(uint64)
 
-  // 冻结账户操作
-  unfrozenAccount(string account) Response
+  // 在transfer合约中给某个账户设置一定的余额
+  function setBalance(string id, uint64 amount) public
 }
 ```
 
 ### DataSwapper合约
 
-```go
-public interface DataSwapper {
+```solidity
   // 发起一个跨链获取数据交易的接口
-  get(string dstChainID, string dstAddr, string key) Response
+  function get(string dstChainID, string dstAddr, string key) public
 
   // 提供给Broker合约调用，当Broker收到跨链获取数据的请求时取数据的接口
-  interchainGet(string key) Response
+  function interchainGet(string key) public onlyBroker returns(bool, string memory)
 
   // 跨链获取到的数据回写的接口
-  interchainSet(string key, string value) Response
-}
+  function interchainSet(string key, string value) public onlyBroker
 ```
 
 ## 具体实现
@@ -107,11 +111,11 @@ public interface DataSwapper {
 
 - [__Solidity 跨链合约实现__](https://github.com/meshplus/pier-client-ethereum/tree/master/example)
 
-- [chaincode 跨链合约实现](https://github.com/meshplus/pier-client-fabric/tree/master/example)
+- [__Chaincode 跨链合约实现__](https://github.com/meshplus/pier-client-fabric/tree/master/example)
 
 如果你需要新的语言编写合约，你可以按照我们的设计思路和参考实现进行进一步的开发。
 
-现在我们支持Hyperchain EVM合约、以太坊私链Solidity合约、BCOS上的EVM合约以及Fabric上chaincode合约编写跨链合约。
+现在我们支持Hyperchain EVM合约、以太坊私链Solidity合约、BCOS EVM合约以及Fabric Chaincode合约。
 
 ## Hyperchain、以太坊、BCOS上的EVM合约
 
@@ -123,7 +127,7 @@ public interface DataSwapper {
 
 假设你已经有了一个简单的KV存储的业务合约，代码如下：
 
-```javascript
+```solidity
 pragma solidity >=0.5.7;
 
 contract DataSwapper {
@@ -145,8 +149,9 @@ contract DataSwapper {
 
 ### 发起跨链数据交换的接口
 
-```javascript
+```solidity
 contract DataSwapper {
+    // broker合约地址
 	address BrokerAddr = 0x2346f3BA3F0B6676aa711595daB8A27d0317DB57;
     Broker broker = Broker(BrokerAddr);
 
@@ -158,7 +163,7 @@ contract DataSwapper {
 }
 
 contract Broker {
-    function emitInterchainEvent(address destChainID, string memory destAddr, string memory funcs, string memory args, string memory argscb, string memory argsrb);
+    function emitInterchainEvent(address destChainID, string memory destAddr, string memory funcs, string memory args, string memory argscb, string memory argsrb) public;
 }
 ```
 
@@ -166,14 +171,19 @@ contract Broker {
 
 ### 跨链获取的接口
 
-```javascript
-modifier onlyBroker {
-        require(msg.sender == BrokerAddr, "Invoker are not the Broker");
-        _;
-}
+```solidity
+contract DataSwapper {
+    
+    ...
 
-function interchainGet(string memory key) public onlyBroker returns(bool, string memory) {
-        return (true, dataM[key]);
+    modifier onlyBroker {
+            require(msg.sender == BrokerAddr, "Invoker are not the Broker");
+            _;
+    }
+    
+    function interchainGet(string memory key) public onlyBroker returns(bool, string memory) {
+            return (true, dataM[key]);
+    }
 }
 ```
 我们规定跨链调用的接口的第一个返回值类型必须是bool类型，它用来表示跨链调用是否成功。
@@ -181,16 +191,24 @@ function interchainGet(string memory key) public onlyBroker returns(bool, string
 
 ### 跨链回写的接口
 
-```javascript
-function interchainSet(string memory key, string memory value) public onlyBroker {
+```solidity
+contract DataSwapper {
+
+    ...
+
+    function interchainSet(string memory key, string memory value) public onlyBroker {
         setData(key, value);
+    }
+
+    ...
+
 }
 
 ```
 
 ## Fabric
 
-本节主要说明在Fabric应用链上，如何使用我们提供的跨链管理合约Broker，在你已有业务合约的基础上添加接口，以跨链能力。
+本节主要说明在Fabric应用链上，如何使用我们提供的跨链管理合约Broker，在你已有业务合约的基础上添加接口，以获得跨链能力。
 
 ### 业务合约Demo
 
@@ -253,13 +271,13 @@ func main() {
 
 ### 发起跨链数据交换的接口
 
-为了方便用户使用，我们在原来获取数据的接口基础增加这个功能：
+为了方便用户使用，我们在原来获取数据的接口基础上增加这个功能：
 
 ```go
 const (
-	channelID            = "mychannel"
-	brokerContractName   = "broker"
-	interchainInvokeFunc = "InterchainDataSwapInvoke"
+	channelID               = "mychannel"
+	brokerContractName      = "broker"
+    emitInterchainEventFunc = "EmitInterchainEvent"
 )
 
 func (s *KVStore) get(stub shim.ChaincodeStubInterface, args []string) peer.Response {
@@ -303,7 +321,7 @@ response := stub.InvokeChaincode(brokerContractName, b, channelID)
 
 ```go
 func (s *KVStore) interchainGet(stub shim.ChaincodeStubInterface, args []string) peer.Response {
-	if len(args) != 2 {
+	if len(args) != 1 {
 	   return shim.Error("incorrect number of arguments")
 	}
 
@@ -316,7 +334,7 @@ func (s *KVStore) interchainGet(stub shim.ChaincodeStubInterface, args []string)
 }
 ```
 
-`interchainGet` 接受参数 `key`，在本合约中查询该`Key`值对应的`value`，并返回。该接口提供给`Broker`合约进行跨链获取数据的调用。
+`interchainGet` 接收参数 `key`，在本合约中查询该`Key`值对应的`value`，并返回。该接口提供给`Broker`合约进行跨链获取数据的调用。
 
 ### 跨链回写的接口
 
@@ -335,7 +353,7 @@ func (s *KVStore) interchainSet(stub shim.ChaincodeStubInterface, args []string)
 }
 ```
 
-`interchainSet` 接受参数 `key`，在本合约中设置`Key`值对应的`value`。该接口提供给`Broker`合约回写跨链获取数据的时候进行调用。
+`interchainSet` 接收参数 `key`，在本合约中设置`Key`值对应的`value`。该接口提供给`Broker`合约回写跨链获取数据的时候进行调用。
 
 
 

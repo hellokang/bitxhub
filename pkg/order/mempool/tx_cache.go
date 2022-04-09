@@ -1,20 +1,26 @@
 package mempool
 
 import (
+	"context"
 	"time"
 
 	"github.com/meshplus/bitxhub-model/pb"
 	"github.com/sirupsen/logrus"
 )
 
+type TxWithResp struct {
+	Tx pb.Transaction
+	Ch chan bool
+}
+
 type TxCache struct {
 	TxSetC  chan *pb.Transactions
 	RecvTxC chan pb.Transaction
+	TxRespC chan *TxWithResp
 
 	txSet      []pb.Transaction
 	timerC     chan bool
 	stopTimerC chan bool
-	close      chan bool
 	txSetTick  time.Duration
 	txSetSize  uint64
 	logger     logrus.FieldLogger
@@ -23,8 +29,8 @@ type TxCache struct {
 func NewTxCache(txSliceTimeout time.Duration, txSetSize uint64, logger logrus.FieldLogger) *TxCache {
 	txCache := &TxCache{}
 	txCache.RecvTxC = make(chan pb.Transaction, DefaultTxCacheSize)
-	txCache.close = make(chan bool)
 	txCache.TxSetC = make(chan *pb.Transactions)
+	txCache.TxRespC = make(chan *TxWithResp)
 	txCache.timerC = make(chan bool)
 	txCache.stopTimerC = make(chan bool)
 	txCache.txSet = make([]pb.Transaction, 0)
@@ -42,11 +48,11 @@ func NewTxCache(txSliceTimeout time.Duration, txSetSize uint64, logger logrus.Fi
 	return txCache
 }
 
-func (tc *TxCache) ListenEvent() {
+func (tc *TxCache) ListenEvent(ctx context.Context) {
 	for {
 		select {
-		case <-tc.close:
-			tc.logger.Info("Exit transaction cache")
+		case <-ctx.Done():
+			tc.logger.Infof("Exit transaction cache ListenEvent")
 			return
 
 		case tx := <-tc.RecvTxC:
